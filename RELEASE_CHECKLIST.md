@@ -2,6 +2,12 @@
 
 ## ✅ Completed
 
+### Critical Fixes (Post-Initial Release)
+- [x] **CRITICAL BUG FIXED:** Call offset in `_start` stub corrected
+  - Issue: Call instruction used offset +10 instead of +9
+  - Impact: Would cause segmentation fault on execution
+  - Status: Fixed and verified (commit 2406ad6)
+
 ### Repository Setup
 - [x] Git repository initialized
 - [x] Initial commit created
