@@ -70,13 +70,14 @@ class ELF64Writer:
         xor_edi = bytes([0x31, 0xFF])
         
         # call main
-        # main liegt directly nach _start
-        # _start ist ca. 15 bytes, main kommt danach
+        # main lies directly after _start stub
+        # _start stub is 16 bytes total:
+        #   xor edi, edi (2) + call (5) + mov edi, eax (2) + mov eax, 60 (5) + syscall (2) = 16
         # call rel32 = E8 <offset>
-        # offset = (main_addr - (current_addr + 5))
-        # for now: main ist bei _start + 15 bytes
-        # call_offset = 15 - 5 = 10 (0x0A)
-        call_main = bytes([0xE8]) + struct.pack('<i', 10)
+        # offset = (target_addr - (call_end_addr))
+        # call is at offset 2, ends at 7
+        # main starts at 16, so offset = 16 - 7 = 9
+        call_main = bytes([0xE8]) + struct.pack('<i', 9)
         
         # mov edi, eax
         mov_edi_eax = bytes([0x89, 0xC7])
