@@ -47,6 +47,14 @@
           "match": "\\bsyscall\\b"
         },
         {
+          "name": "keyword.control.mode.axis",
+          "match": "\\bmode\\b"
+        },
+        {
+          "name": "constant.language.mode.axis",
+          "match": "\\b(script|compile)\\b"
+        },
+        {
           "name": "support.function.io.axis",
           "match": "\\b(write|writeln|read|readln|readchar|read_failed)\\b"
         }
