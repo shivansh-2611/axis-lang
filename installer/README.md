@@ -43,7 +43,7 @@ axis --version
 Expected output:
 ```
 AXIS Language Compiler
-Version: 1.0.1-beta
+Version: 1.0.2-beta
 Platform: Linux x86-64
 Python: Python 3.x.x
 ```

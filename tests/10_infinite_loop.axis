@@ -1,11 +1,11 @@
-// AXIS Example 10: Infinite Loop with Break
-// Demonstrates repeat/loop for infinite loops
-// Expected exit code: 50
+// AXIS Example 10: Infinite Loop mit Break
+// repeat/loop für endlosschleifen
+// expected: 50
 
 func main() -> i32:
     counter: i32 = 0
     
-    # Infinite loop - must use break to exit
+    # endlosschleife - break zum rausspringen
     repeat:
         counter = counter + 1
         

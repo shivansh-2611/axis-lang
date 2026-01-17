@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # AXIS Language Uninstaller for Linux
-# Version: 1.0.1-beta
+# Version: 1.0.2-beta
 #
 
 set -e

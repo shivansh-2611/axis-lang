@@ -1,4 +1,4 @@
-"""AXIS Semantic Analyzer - Type checking and symbol table management."""
+"""AXIS Semantic Analyzer - type checking und symbol table kram"""
 
 from dataclasses import dataclass, field
 from typing import Optional, Dict
@@ -10,12 +10,13 @@ TYPE_SIZES = {
     'u8': 1, 'u16': 2, 'u32': 4, 'u64': 8,
     'ptr': 8,
     'bool': 1,
+    'str': 8,  # poistring datanter to 
 }
 
 SIGNED_TYPES = {'i8', 'i16', 'i32', 'i64'}
 UNSIGNED_TYPES = {'u8', 'u16', 'u32', 'u64'}
 INTEGER_TYPES = SIGNED_TYPES | UNSIGNED_TYPES
-VALID_TYPES = INTEGER_TYPES | {'ptr', 'bool'}
+VALID_TYPES = INTEGER_TYPES | {'ptr', 'bool', 'str'}
 
 
 def is_integer_type(type_name: str) -> bool:
@@ -38,7 +39,7 @@ def align_offset(offset: int, alignment: int) -> int:
 
 @dataclass
 class Symbol:
-    """Symbol in der Symbol table"""
+    """ein symbol in der symbol table, nix besonderes"""
     name: str
     type: str
     mutable: bool
@@ -209,6 +210,8 @@ class SemanticAnalyzer:
             self.analyze_break(stmt)
         elif isinstance(stmt, Continue):
             self.analyze_continue(stmt)
+        elif isinstance(stmt, Write):
+            self.analyze_write(stmt)
         elif isinstance(stmt, ExprStatement):
             self.analyze_expression(stmt.expression)
         else:
@@ -221,7 +224,15 @@ class SemanticAnalyzer:
         
         # Init-Expression typisieren (If present)
         if vardecl.init:
-            init_type = self.analyze_expression(vardecl.init)
+            # Special handling for read expressions - pass target type
+            if isinstance(vardecl.init, Read):
+                init_type = self.analyze_read(vardecl.init, vardecl.type)
+            elif isinstance(vardecl.init, Readln):
+                init_type = self.analyze_readln(vardecl.init, vardecl.type)
+            elif isinstance(vardecl.init, Readchar):
+                init_type = self.analyze_readchar(vardecl.init, vardecl.type)
+            else:
+                init_type = self.analyze_expression(vardecl.init)
             
             # Type-Check: init muss vom gleichen Typ sein
             # Special case: Allow i32 literals to be assigned to other integer types if in range
@@ -265,7 +276,16 @@ class SemanticAnalyzer:
         
         # Type-Check
         target_type = symbol.type
-        value_type = self.analyze_expression(assign.value)
+        
+        # Special handling for read expressions - pass target type
+        if isinstance(assign.value, Read):
+            value_type = self.analyze_read(assign.value, target_type)
+        elif isinstance(assign.value, Readln):
+            value_type = self.analyze_readln(assign.value, target_type)
+        elif isinstance(assign.value, Readchar):
+            value_type = self.analyze_readchar(assign.value, target_type)
+        else:
+            value_type = self.analyze_expression(assign.value)
         
         # Special case: Allow i32 literals to be assigned to other integer types if in range
         if target_type in ['i8', 'i16', 'i64', 'u8', 'u16', 'u32', 'u64'] and value_type == 'i32':
@@ -341,6 +361,17 @@ class SemanticAnalyzer:
         if self.in_loop == 0:
             self.error("Continue outside of loop")
     
+    def analyze_write(self, write_stmt: Write):
+        """write() und writeln() - akzeptiert str, integers und bool"""
+        value_type = self.analyze_expression(write_stmt.value)
+        
+        # Check ob valid output type
+        if value_type not in VALID_TYPES:
+            self.error(f"Cannot write value of type '{value_type}'")
+        
+        # Annotate für codegen
+        write_stmt.value_type = value_type
+    
     def analyze_expression(self, expr: Expression) -> str:
         """
         Analyzes Expression und gibt Typ .
@@ -358,6 +389,16 @@ class SemanticAnalyzer:
             return self.analyze_call(expr)
         elif isinstance(expr, Deref):
             return self.analyze_deref(expr)
+        elif isinstance(expr, StringLiteral):
+            return self.analyze_string_literal(expr)
+        elif isinstance(expr, Read):
+            return self.analyze_read(expr)
+        elif isinstance(expr, Readln):
+            return self.analyze_readln(expr)
+        elif isinstance(expr, Readchar):
+            return self.analyze_readchar(expr)
+        elif isinstance(expr, ReadFailed):
+            return self.analyze_read_failed(expr)
         else:
             self.error(f"Unknown expression type: {type(expr).__name__}")
     
@@ -375,6 +416,67 @@ class SemanticAnalyzer:
             return inferred_type
         
         self.error(f"Unknown literal type: {lit.type}")
+    
+    def analyze_string_literal(self, string_lit: StringLiteral) -> str:
+        """String literal - einfach str Typ zurückgeben"""
+        string_lit.inferred_type = 'str'
+        return 'str'
+    
+    def analyze_read(self, read_expr: 'Read', target_type: str = None) -> str:
+        """
+        read() - read until EOF
+        Type depends on assignment target:
+        - i8/i16/i32/i64/u8/u16/u32/u64: parse as integer
+        - str: read as string
+        """
+        if target_type is None:
+            # Default to str if no target type specified
+            target_type = 'str'
+        
+        if target_type not in INTEGER_TYPES and target_type != 'str':
+            self.error(f"read() can only be assigned to integer or str types, not {target_type}")
+        
+        read_expr.inferred_type = target_type
+        read_expr.target_type = target_type
+        return target_type
+    
+    def analyze_readln(self, readln_expr: 'Readln', target_type: str = None) -> str:
+        """
+        readln() - read one line until \\n
+        Type depends on assignment target:
+        - i8/i16/i32/i64/u8/u16/u32/u64: parse as integer
+        - str: read as string (newline stripped)
+        """
+        if target_type is None:
+            target_type = 'str'
+        
+        if target_type not in INTEGER_TYPES and target_type != 'str':
+            self.error(f"readln() can only be assigned to integer or str types, not {target_type}")
+        
+        readln_expr.inferred_type = target_type
+        readln_expr.target_type = target_type
+        return target_type
+    
+    def analyze_readchar(self, readchar_expr: 'Readchar', target_type: str = None) -> str:
+        """
+        readchar() - read single byte, returns -1 for EOF
+        Always returns i32 (to accommodate -1 for EOF)
+        Cannot be assigned to str (compile error)
+        """
+        if target_type == 'str':
+            self.error("readchar() cannot be assigned to str type - use read() or readln() instead")
+        
+        # Always i32 to handle -1 for EOF
+        readchar_expr.inferred_type = 'i32'
+        readchar_expr.target_type = 'i32'
+        return 'i32'
+    
+    def analyze_read_failed(self, read_failed_expr: 'ReadFailed') -> str:
+        """
+        read_failed() - returns bool indicating if last read operation failed
+        """
+        read_failed_expr.inferred_type = 'bool'
+        return 'bool'
     
     def analyze_identifier(self, ident: Identifier) -> str:
         symbol = self.lookup_symbol(ident.name)

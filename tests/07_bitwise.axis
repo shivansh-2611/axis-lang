@@ -1,15 +1,15 @@
 // AXIS Example 07: Bitwise Operations
-// Demonstrates AND, OR, XOR, and shifts
-// Expected exit code: 42
+// AND, OR, XOR und shifts
+// expected: 42
 
 func main() -> i32:
-    a: i32 = 0b00101010  # 42 in binary
+    a: i32 = 0b00101010  # 42 in binär
     b: i32 = 0xFF        # 255
     
-    # Bitwise AND to extract lower bits
-    masked: i32 = a & 0x3F  # Keep lower 6 bits: 42
+    # bitwise AND für lower bits
+    masked: i32 = a & 0x3F  # untere 6 bits: 42
     
-    # Verify with shifts
+    # mit shifts checken
     shifted: i32 = 21 << 1   # 21 * 2 = 42
     
     when masked == shifted:

@@ -45,6 +45,10 @@
         {
           "name": "keyword.other.axis",
           "match": "\\bsyscall\\b"
+        },
+        {
+          "name": "support.function.io.axis",
+          "match": "\\b(write|writeln|read|readln|readchar|read_failed)\\b"
         }
       ]
     },
@@ -52,7 +56,7 @@
       "patterns": [
         {
           "name": "storage.type.axis",
-          "match": "\\b(i8|i16|i32|i64|u8|u16|u32|u64|bool|ptr)\\b"
+          "match": "\\b(i8|i16|i32|i64|u8|u16|u32|u64|bool|ptr|str)\\b"
         }
       ]
     },

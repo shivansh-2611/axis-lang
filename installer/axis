@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # AXIS Language CLI Wrapper
-# Version: 1.0.1-beta
+# Version: 1.0.2-beta
 #
 
 # This will be updated by install.sh
@@ -25,7 +25,7 @@ if [ ! -d "$AXIS_LIB_DIR" ]; then
 fi
 
 # Version information
-VERSION="1.0.1-beta"
+VERSION="1.0.2-beta"
 
 # Show help
 show_help() {

@@ -1,6 +1,6 @@
 """
-ELF64 Executable Format Generator
-Generates executable Linux-Executables aus Machine Code without linker.
+ELF64 executable generator
+macht aus machine code ne richtige linux executable, ohne linker
 """
 
 import struct
@@ -9,17 +9,17 @@ from typing import Optional
 
 class ELF64Writer:
     """
-    Minimaler ELF64 Executable Writer für x86-64 Linux.
+    minimaler ELF64 writer für x86-64 linux
     
-    Struktur:
-    - ELF Header (64 bytes)
-    - Program Header Table (56 bytes * 1 = 56 bytes)
-    - Padding bis Page Alignment (0x1000)
+    layout:
+    - ELF header (64 bytes)
+    - program header (56 bytes)
+    - padding bis page alignment
     - _start stub
-    - User Code (main)
+    - user code
     
-    Virtual Address: 0x400000 (Standard)
-    Entry Point: 0x400000 + 0x1000 (_start)
+    virtual addr: 0x400000 (standard)
+    entry: 0x401000 (_start)
     """
     
     # elf magic numbers und constants
@@ -39,14 +39,21 @@ class ELF64Writer:
     BASE_VADDR = 0x400000
     PAGE_SIZE = 0x1000
     
-    def __init__(self, user_code: bytes, verbose: bool = False):
+    def __init__(self, user_code: bytes, rodata: bytes = b'', string_offsets: dict = None, 
+                 bss_size: int = 0, verbose: bool = False):
         """
         Args:
             user_code: Machine Code für main() und andere Funktionen
+            rodata: Read-only Data Section (string literals etc)
+            string_offsets: Dict von label -> offset in rodata für relocation
+            bss_size: Size of BSS section (uninitialized writable data)
             verbose: Debug-Output
         """
         # setup für elf generation
         self.user_code = user_code
+        self.rodata = rodata
+        self.string_offsets = string_offsets or {}
+        self.bss_size = bss_size
         self.verbose = verbose
         
     def log(self, msg: str):
@@ -140,7 +147,9 @@ class ELF64Writer:
         header.extend(struct.pack('<H', 56))  # 0x36
         
         # e_phnum (2 bytes) - Number of Program Headers
-        header.extend(struct.pack('<H', 1))  # 0x38
+        # 1 for code+rodata, plus 1 for BSS if needed
+        num_phdrs = 2 if self.bss_size > 0 else 1
+        header.extend(struct.pack('<H', num_phdrs))  # 0x38
         
         # e_shentsize (2 bytes) - Section Header Entry Size
         header.extend(struct.pack('<H', 0))  # 0x3A
@@ -196,12 +205,53 @@ class ELF64Writer:
         assert len(header) == 56, f"Program Header must be 56 bytes, got {len(header)}"
         return bytes(header)
     
-    def generate(self) -> bytes:
+    def build_bss_program_header(self, vaddr: int, mem_size: int) -> bytes:
+        """
+        Builds Program Header for BSS (writable uninitialized data) Segment (56 bytes).
+        
+        Args:
+            vaddr: Virtual address of BSS segment
+            mem_size: Size of BSS in memory
+        
+        Returns:
+            56 bytes Program Header
+        """
+        header = bytearray()
+        
+        # segment type
+        header.extend(struct.pack('<I', self.PT_LOAD))
+        
+        # p_flags (4 bytes) - R+W (no execute)
+        flags = self.PF_R | self.PF_W
+        header.extend(struct.pack('<I', flags))
+        
+        # p_offset (8 bytes) - File Offset (0 since BSS has no file content)
+        header.extend(struct.pack('<Q', 0))
+        
+        # p_vaddr (8 bytes) - Virtual Address
+        header.extend(struct.pack('<Q', vaddr))
+        
+        # p_paddr (8 bytes) - Physical Address
+        header.extend(struct.pack('<Q', vaddr))
+        
+        # p_filesz (8 bytes) - Size in File (0 for BSS)
+        header.extend(struct.pack('<Q', 0))
+        
+        # p_memsz (8 bytes) - Size in Memory
+        header.extend(struct.pack('<Q', mem_size))
+        
+        # p_align (8 bytes) - Alignment
+        header.extend(struct.pack('<Q', self.PAGE_SIZE))
+        
+        assert len(header) == 56, f"BSS Program Header must be 56 bytes, got {len(header)}"
+        return bytes(header)
+    
+    def generate(self) -> tuple[bytes, int, int]:
         """
         Generates komplettes ELF64 Executable.
         
         Returns:
-            executable Binary
+            tuple(executable Binary, rodata_vaddr, bss_vaddr)
         """
         self.log("Starting ELF64 generation...")
         
@@ -212,19 +262,34 @@ class ELF64Writer:
         # 2. Calculate offsets
         elf_header_size = 64
         program_header_size = 56
-        headers_size = elf_header_size + program_header_size
+        num_phdrs = 2 if self.bss_size > 0 else 1
+        headers_size = elf_header_size + (program_header_size * num_phdrs)
         
         code_offset = self.PAGE_SIZE  # 0x1000
         padding_size = code_offset - headers_size
         
+        # Code + rodata in same segment (simpler, beide read-only)
         total_code_size = len(start_stub) + len(self.user_code)
-        total_file_size = code_offset + total_code_size
+        rodata_offset = code_offset + total_code_size  # file offset
+        rodata_vaddr = self.BASE_VADDR + rodata_offset  # virtual addr
+        
+        total_file_size = rodata_offset + len(self.rodata)
+        
+        # BSS virtual address (after rodata, page-aligned)
+        bss_vaddr = 0
+        if self.bss_size > 0:
+            # Put BSS at next page after code+rodata
+            bss_page = ((rodata_vaddr + len(self.rodata) + self.PAGE_SIZE - 1) // self.PAGE_SIZE) * self.PAGE_SIZE
+            bss_vaddr = bss_page
+            self.log(f"BSS vaddr: 0x{bss_vaddr:X} ({self.bss_size} bytes)")
         
         # Entry Point = base + code_offset (wo _start liegt)
         entry_point = self.BASE_VADDR + code_offset
         
         self.log(f"Code offset: 0x{code_offset:X}")
         self.log(f"Entry point: 0x{entry_point:X}")
+        self.log(f"Rodata offset: 0x{rodata_offset:X}")
+        self.log(f"Rodata vaddr: 0x{rodata_vaddr:X}")
         self.log(f"Total file size: {total_file_size} bytes")
         
         # 3. Build ELF Header
@@ -233,15 +298,22 @@ class ELF64Writer:
             program_header_offset=elf_header_size
         )
         
-        # 4. Build Program Header
+        # 4. Build Program Headers
         program_header = self.build_program_header(
             file_size=total_file_size,
             mem_size=total_file_size
         )
         
+        bss_program_header = b''
+        if self.bss_size > 0:
+            bss_program_header = self.build_bss_program_header(
+                vaddr=bss_vaddr,
+                mem_size=self.bss_size
+            )
+        
         # 5. Assemble Binary
         padding = bytes(padding_size)
-        executable = elf_header + program_header + padding + start_stub + self.user_code
+        executable = elf_header + program_header + bss_program_header + padding + start_stub + self.user_code + self.rodata
         
         self.log(f"Generated ELF64 executable: {len(executable)} bytes")
         
@@ -249,19 +321,28 @@ class ELF64Writer:
         assert len(executable) == total_file_size, \
             f"Size mismatch: expected {total_file_size}, got {len(executable)}"
         
-        return executable
+        return executable, rodata_vaddr, bss_vaddr
 
-def write_elf_executable(machine_code: bytes, output_path: str, verbose: bool = False):
+def write_elf_executable(machine_code: bytes, output_path: str, rodata: bytes = b'', 
+                          string_offsets: dict = None, bss_size: int = 0, 
+                          verbose: bool = False) -> tuple[int, int]:
     """
     Schreibt Machine Code als ELF64 Executable.
     
     Args:
         machine_code: Kompilierter Code (main + andere Funktionen)
         output_path: Pfad zur Output-Datei
+        rodata: Read-only data (string literals etc)
+        string_offsets: Dict von label -> offset in rodata
+        bss_size: Size of BSS section for writable globals
         verbose: Debug-Output
+    
+    Returns:
+        tuple(rodata_vaddr, bss_vaddr): Virtual addresses for relocations
     """
-    writer = ELF64Writer(machine_code, verbose=verbose)
-    executable = writer.generate()
+    writer = ELF64Writer(machine_code, rodata=rodata, string_offsets=string_offsets, 
+                         bss_size=bss_size, verbose=verbose)
+    executable, rodata_vaddr, bss_vaddr = writer.generate()
     
     with open(output_path, 'wb') as f:
         f.write(executable)
@@ -274,6 +355,8 @@ def write_elf_executable(machine_code: bytes, output_path: str, verbose: bool = 
     if verbose:
         print(f"[ELF64] Written executable to: {output_path}")
         print(f"[ELF64] Run with: ./{output_path}")
+    
+    return rodata_vaddr, bss_vaddr
 
 if __name__ == '__main__':
     # Test: Minimales Programm (ret 0)

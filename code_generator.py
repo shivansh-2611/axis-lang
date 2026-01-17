@@ -1,6 +1,6 @@
 """
-AXIS Code Generator - x86-64 Backend
-Transformiert typisierten AST in x86-64 Assembly über Assembler-Backend.
+AXIS Code Generator - x86-64 backend
+typisierten AST -> assembly -> assembler backend macht den rest
 """
 
 import re
@@ -11,23 +11,21 @@ from semantic_analyzer import SemanticAnalyzer
 
 class CodeGenerator:
     """
-    x86-64 Code Generator für AXIS
+    x86-64 code generator für AXIS
     
-    Calling Convention: System V AMD64 (Linux)
-    - Args: rdi, rsi, rdx, rcx, r8, r9 (für i32: edi, esi, edx, ecx, r8d, r9d)
-    - Return: rax (für i32: eax)
-    - Callee-saved: rbx, rbp, r12-r15
-    - Caller-saved: alle anderen
+    calling convention: System V AMD64 (linux halt)
+    - args: rdi, rsi, rdx, rcx, r8, r9 (für i32: edi, esi, etc)
+    - return: rax/eax
+    - callee-saved: rbx, rbp, r12-r15
     
-    Expression Evaluation:
-    - Ergebnis in eax/rax
-    - Temp-Register: ecx, edx
+    expression evaluation:
+    - ergebnis landet in eax/rax
+    - temp register: ecx, edx
     
-    Stack-Layout:
-    - [rbp+0]   = saved rbp
-    - [rbp-4]   = erste lokale Variable (i32)
-    - [rbp-8]   = zweite lokale Variable
-    - ...
+    stack layout (klassisch):
+    - [rbp+0]  = saved rbp
+    - [rbp-4]  = erste local var
+    - [rbp-8]  = zweite, usw
     """
     
     def __init__(self):
@@ -35,6 +33,17 @@ class CodeGenerator:
         self.label_counter = 0
         self.current_function = None
         self.loop_stack = []  # Stack für break/continue: (continue_label, break_label)
+        
+        # String literals für .rodata section
+        self.string_data: dict[str, tuple[str, int]] = {}  # label -> (content, length)
+        self.string_counter = 0
+        
+        # Spezial strings für bool output
+        self.true_label = None
+        self.false_label = None
+        
+        # Read error flag - global runtime state
+        self.needs_read_failed_flag = False
         
         # System V AMD64 Argument-Register
         self.arg_regs_64 = ['rdi', 'rsi', 'rdx', 'rcx', 'r8', 'r9']
@@ -91,12 +100,49 @@ class CodeGenerator:
     def compile(self, program: Program) -> str:
         self.asm_lines = []
         self.label_counter = 0
+        self.string_data = {}
+        self.string_counter = 0
+        self.true_label = None
+        self.false_label = None
+        self.needs_read_failed_flag = False
         
         # Generiere Code für alle Funktionen
         for func in program.functions:
             self.compile_function(func)
         
         return '\n'.join(self.asm_lines)
+    
+    def get_string_data(self) -> dict[str, tuple[str, int]]:
+        """Returns collected string data for .rodata section"""
+        return self.string_data
+    
+    def needs_bss_section(self) -> bool:
+        """Returns True if code needs BSS section (for _read_failed flag)"""
+        return self.needs_read_failed_flag
+    
+    def needs_bss_section(self) -> bool:
+        """Returns True if we need a .bss section (for read_failed flag)"""
+        return self.needs_read_failed_flag
+    
+    def add_string(self, content: str) -> str:
+        """Add string to data section, return its label"""
+        # Check if string already exists
+        for label, (existing_content, _) in self.string_data.items():
+            if existing_content == content:
+                return label
+        
+        label = f"_str_{self.string_counter}"
+        self.string_counter += 1
+        self.string_data[label] = (content, len(content))
+        return label
+    
+    def get_bool_labels(self) -> tuple[str, str]:
+        """Get or create True/False string labels"""
+        if self.true_label is None:
+            self.true_label = self.add_string("True")
+        if self.false_label is None:
+            self.false_label = self.add_string("False")
+        return self.true_label, self.false_label
     
     def compile_function(self, func: Function):
         self.current_function = func
@@ -144,6 +190,8 @@ class CodeGenerator:
             self.compile_break(stmt)
         elif isinstance(stmt, Continue):
             self.compile_continue(stmt)
+        elif isinstance(stmt, Write):
+            self.compile_write(stmt)
         elif isinstance(stmt, ExprStatement):
             self.compile_expression(stmt.expression)
         else:
@@ -161,7 +209,8 @@ class CodeGenerator:
                 self.emit(f"mov byte [rbp{vardecl.stack_offset:+d}], al")
             elif var_type in ['i16', 'u16']:
                 self.emit(f"mov word [rbp{vardecl.stack_offset:+d}], ax")
-            elif var_type in ['i64', 'u64']:
+            elif var_type in ['i64', 'u64', 'str']:
+                # str is a pointer, needs 64-bit
                 self.emit(f"mov qword [rbp{vardecl.stack_offset:+d}], rax")
             else:
                 self.emit(f"mov [rbp{vardecl.stack_offset:+d}], eax")
@@ -180,7 +229,8 @@ class CodeGenerator:
             self.emit(f"mov byte [rbp{symbol.stack_offset:+d}], al")
         elif symbol.type in ['i16', 'u16']:
             self.emit(f"mov word [rbp{symbol.stack_offset:+d}], ax")
-        elif symbol.type in ['i64', 'u64']:
+        elif symbol.type in ['i64', 'u64', 'str']:
+            # str is a pointer, needs 64-bit
             self.emit(f"mov qword [rbp{symbol.stack_offset:+d}], rax")
         else:
             self.emit(f"mov [rbp{symbol.stack_offset:+d}], eax")
@@ -257,8 +307,253 @@ class CodeGenerator:
         continue_label, _ = self.loop_stack[-1]
         self.emit(f"jmp {continue_label}")
     
+    def compile_write(self, write_stmt: Write):
+        """
+        write() / writeln() - output to stdout via syscall
+        
+        Handling:
+        - str: ptr in rax, length known from string data
+        - integers: convert to decimal string, then print
+        - bool: print "True" or "False"
+        """
+        value_type = write_stmt.value_type
+        
+        if value_type == 'str':
+            self.compile_write_string(write_stmt)
+        elif value_type == 'bool':
+            self.compile_write_bool(write_stmt)
+        elif value_type in ('i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64'):
+            self.compile_write_integer(write_stmt)
+        else:
+            raise NotImplementedError(f"Cannot write type: {value_type}")
+    
+    def compile_write_string(self, write_stmt: Write):
+        """Write string to stdout"""
+        # Expression muss StringLiteral sein oder Identifier mit str type
+        value = write_stmt.value
+        
+        if isinstance(value, StringLiteral):
+            # String literal - add to data section
+            label = self.add_string(value.value)
+            length = len(value.value)
+            
+            # write(1, ptr, len) syscall
+            # Use movabs with placeholder - pipeline patches actual address
+            self.emit(f"; write string literal")
+            self.emit(f"mov rax, 1")                    # syscall: write
+            self.emit(f"mov rdi, 1")                    # fd: stdout
+            self.emit(f"movabs rsi, @{label}")          # ptr to string (placeholder)
+            self.emit(f"mov rdx, {length}")             # length
+            self.emit("syscall")
+        elif isinstance(value, Identifier):
+            # String variable - null-terminated, need to calculate length
+            symbol = value.symbol
+            self.emit(f"; write string variable (null-terminated)")
+            self.emit(f"mov rsi, qword [rbp{symbol.stack_offset:+d}]")  # load string ptr
+            
+            # Calculate length (find null terminator) - using scasb-like approach
+            self.emit("push rsi")                       # save ptr for write
+            strlen_loop = self.fresh_label("strlen")
+            strlen_done = self.fresh_label("strlen_done")
+            
+            self.emit("xor rcx, rcx")                   # length counter
+            self.emit("mov r10, rsi")                   # r10 = current ptr
+            self.emit_label(strlen_loop)
+            self.emit("movzx eax, byte [r10]")          # load byte
+            self.emit("test al, al")                    # check for null
+            self.emit(f"jz {strlen_done}")
+            self.emit("inc rcx")
+            self.emit("inc r10")
+            self.emit(f"jmp {strlen_loop}")
+            self.emit_label(strlen_done)
+            
+            # rcx = length, rsi was saved on stack
+            self.emit("mov rdx, rcx")                   # length
+            self.emit("pop rsi")                        # restore string ptr
+            self.emit("mov rax, 1")                     # syscall: write
+            self.emit("mov rdi, 1")                     # fd: stdout
+            self.emit("syscall")
+        elif isinstance(value, Read) or isinstance(value, Readln):
+            # Direct write of read result - compile the read, ptr in rax
+            self.compile_expression(value)
+            
+            # rax = string pointer, need strlen
+            self.emit("; write result of read()")
+            self.emit("mov rsi, rax")                   # ptr in rsi
+            self.emit("push rsi")
+            
+            strlen_loop = self.fresh_label("strlen")
+            strlen_done = self.fresh_label("strlen_done")
+            
+            self.emit("xor rcx, rcx")
+            self.emit("mov r10, rsi")
+            self.emit_label(strlen_loop)
+            self.emit("movzx eax, byte [r10]")
+            self.emit("test al, al")
+            self.emit(f"jz {strlen_done}")
+            self.emit("inc rcx")
+            self.emit("inc r10")
+            self.emit(f"jmp {strlen_loop}")
+            self.emit_label(strlen_done)
+            
+            self.emit("mov rdx, rcx")
+            self.emit("pop rsi")
+            self.emit("mov rax, 1")
+            self.emit("mov rdi, 1")
+            self.emit("syscall")
+        else:
+            raise NotImplementedError(f"Cannot write string expression type: {type(value).__name__}")
+        
+        # Newline falls writeln
+        if write_stmt.newline:
+            self.emit_newline()
+    
+    def compile_write_bool(self, write_stmt: Write):
+        """Write bool as True/False"""
+        true_label, false_label = self.get_bool_labels()
+        
+        # Evaluate bool expression
+        self.compile_expression(write_stmt.value)
+        
+        # Check if true or false
+        done_label = self.fresh_label("write_bool_done")
+        
+        self.emit("; write bool")
+        self.emit("test al, al")
+        self.emit(f"jz .write_false_{self.label_counter}")
+        
+        # True case
+        self.emit(f"mov rax, 1")
+        self.emit(f"mov rdi, 1")
+        self.emit(f"movabs rsi, @{true_label}")
+        self.emit(f"mov rdx, 4")  # len("True")
+        self.emit("syscall")
+        self.emit(f"jmp {done_label}")
+        
+        # False case
+        self.emit_label(f".write_false_{self.label_counter}")
+        self.emit(f"mov rax, 1")
+        self.emit(f"mov rdi, 1")
+        self.emit(f"movabs rsi, @{false_label}")
+        self.emit(f"mov rdx, 5")  # len("False")
+        self.emit("syscall")
+        
+        self.emit_label(done_label)
+        
+        if write_stmt.newline:
+            self.emit_newline()
+    
+    def compile_write_integer(self, write_stmt: Write):
+        """
+        Write integer as decimal string
+        
+        Strategy: Stack-basierte Konversion
+        - Push digits auf Stack (reverse order)
+        - Pop und write
+        """
+        value_type = write_stmt.value_type
+        is_signed = value_type in ('i8', 'i16', 'i32', 'i64')
+        
+        # Evaluate expression -> result in rax
+        self.compile_expression(write_stmt.value)
+        
+        # Sign extend if needed for smaller signed types
+        if value_type == 'i8':
+            self.emit("movsx rax, al")
+        elif value_type == 'i16':
+            self.emit("movsx rax, ax")
+        elif value_type == 'i32':
+            self.emit("movsxd rax, eax")
+        elif value_type in ('u8', 'u16', 'u32'):
+            # Zero extend - upper bits should already be 0 from compile_expression
+            pass
+        
+        # Label für conversion
+        skip_neg = self.fresh_label("skip_neg")
+        convert_loop = self.fresh_label("convert_loop")
+        write_loop = self.fresh_label("write_loop")
+        done = self.fresh_label("int_done")
+        
+        self.emit("; write integer")
+        self.emit("push rbx")        # callee-saved
+        self.emit("push r12")        # callee-saved  
+        self.emit("push r13")        # callee-saved
+        
+        self.emit("mov r12, rax")    # save original value
+        self.emit("xor r13, r13")    # digit counter
+        self.emit("xor rbx, rbx")    # negative flag
+        
+        if is_signed:
+            # Check für negative
+            self.emit("test rax, rax")
+            self.emit(f"jns {skip_neg}")
+            self.emit("mov rbx, 1")      # set negative flag
+            self.emit("neg rax")         # make positive
+            self.emit_label(skip_neg)
+        
+        # Convert loop: divide by 10, push remainder
+        self.emit("mov r12, rax")
+        self.emit_label(convert_loop)
+        self.emit("xor rdx, rdx")        # clear for div
+        self.emit("mov rcx, 10")
+        self.emit("div rcx")             # rax = quotient, rdx = remainder
+        self.emit("add dl, '0'")         # convert to ASCII
+        self.emit("push rdx")            # save digit
+        self.emit("inc r13")             # digit count++
+        self.emit("test rax, rax")
+        self.emit(f"jnz {convert_loop}")
+        
+        if is_signed:
+            # Print minus sign if negative
+            skip_minus = self.fresh_label("skip_minus")
+            self.emit("test rbx, rbx")
+            self.emit(f"jz {skip_minus}")
+            # write minus sign
+            self.emit("push '-'")        # push '-' char
+            self.emit("mov rax, 1")
+            self.emit("mov rdi, 1")
+            self.emit("mov rsi, rsp")
+            self.emit("mov rdx, 1")
+            self.emit("syscall")
+            self.emit("add rsp, 8")      # pop '-'
+            self.emit_label(skip_minus)
+        
+        # Write digits
+        self.emit_label(write_loop)
+        self.emit("mov rax, 1")
+        self.emit("mov rdi, 1")
+        self.emit("mov rsi, rsp")        # digit auf stack
+        self.emit("mov rdx, 1")
+        self.emit("syscall")
+        self.emit("add rsp, 8")          # pop digit
+        self.emit("dec r13")
+        self.emit(f"jnz {write_loop}")
+        
+        self.emit("pop r13")
+        self.emit("pop r12")
+        self.emit("pop rbx")
+        
+        if write_stmt.newline:
+            self.emit_newline()
+    
+    def emit_newline(self):
+        """Emit newline character to stdout"""
+        # Add newline string if not exists
+        nl_label = self.add_string("\n")
+        self.emit("; newline")
+        self.emit("mov rax, 1")
+        self.emit("mov rdi, 1")
+        self.emit(f"movabs rsi, @{nl_label}")
+        self.emit("mov rdx, 1")
+        self.emit("syscall")
+    
+    def compile_string_literal(self, string_lit: StringLiteral):
+        """Compile string literal - load pointer to rax"""
+        label = self.add_string(string_lit.value)
+        self.emit(f"movabs rax, @{label}")
+
     def compile_expression(self, expr: Expression):
-        # expression compilation - result landet immer in eax
+        # expression compilation - result landet immer in eax/rax
         if isinstance(expr, Literal):
             self.compile_literal(expr)
         elif isinstance(expr, Identifier):
@@ -269,6 +564,16 @@ class CodeGenerator:
             self.compile_unaryop(expr)
         elif isinstance(expr, Call):
             self.compile_call(expr)
+        elif isinstance(expr, StringLiteral):
+            self.compile_string_literal(expr)
+        elif isinstance(expr, Read):
+            self.compile_read(expr)
+        elif isinstance(expr, Readln):
+            self.compile_readln(expr)
+        elif isinstance(expr, Readchar):
+            self.compile_readchar(expr)
+        elif isinstance(expr, ReadFailed):
+            self.compile_read_failed(expr)
         else:
             raise NotImplementedError(f"Expression type not implemented: {type(expr).__name__}")
     
@@ -327,8 +632,8 @@ class CodeGenerator:
             elif symbol.type == 'u16':
                 # Zero-extend u16 to i32
                 self.emit(f"movzx eax, word [rbp{symbol.stack_offset:+d}]")
-            elif symbol.type in ['i64', 'u64']:
-                # Full 64-bit load
+            elif symbol.type in ['i64', 'u64', 'str']:
+                # Full 64-bit load (str is a pointer)
                 self.emit(f"mov rax, qword [rbp{symbol.stack_offset:+d}]")
             else:
                 # Default i32 load
@@ -474,6 +779,412 @@ class CodeGenerator:
         self.emit(f"call {call.name}")
         
         # Ergebnis ist bereits in eax
+    
+    # ==========================================================================
+    # READ SYSCALL IMPLEMENTATIONS
+    # ==========================================================================
+    
+    def compile_read(self, read_expr: 'Read'):
+        """
+        read() - read until EOF
+        Uses mmap to allocate buffer, reads into it
+        Result: rax = pointer to string (for str) or parsed integer
+        """
+        target_type = getattr(read_expr, 'target_type', 'str')
+        self.needs_read_failed_flag = True
+        
+        if target_type == 'str':
+            self.compile_read_string_until_eof()
+        else:
+            # Read until EOF, parse as integer
+            self.compile_read_integer_until_eof(target_type)
+    
+    def compile_readln(self, readln_expr: 'Readln'):
+        """
+        readln() - read one line until \\n
+        Uses mmap to allocate buffer, reads into it
+        Result: rax = pointer to string (for str) or parsed integer
+        """
+        target_type = getattr(readln_expr, 'target_type', 'str')
+        self.needs_read_failed_flag = True
+        
+        if target_type == 'str':
+            self.compile_readln_string()
+        else:
+            # Read line, parse as integer
+            self.compile_readln_integer(target_type)
+    
+    def compile_readchar(self, readchar_expr: 'Readchar'):
+        """
+        readchar() - read single byte
+        Returns i32: byte value (0-255) or -1 for EOF
+        """
+        self.needs_read_failed_flag = True
+        
+        self.emit("; readchar() - read single byte")
+        self.emit("sub rsp, 8")          # Allocate 1 byte on stack (aligned)
+        
+        # read(0, rsp, 1)
+        self.emit("xor eax, eax")        # syscall: read = 0
+        self.emit("xor edi, edi")        # fd: stdin = 0
+        self.emit("mov rsi, rsp")        # buffer: stack
+        self.emit("mov edx, 1")          # count: 1 byte
+        self.emit("syscall")
+        
+        # Check result
+        self.emit("test rax, rax")
+        done_label = self.fresh_label("readchar_done")
+        
+        # If rax <= 0, EOF or error
+        self.emit(f"jle .readchar_eof_{self.label_counter}")
+        
+        # Success: load byte, clear error flag
+        self.emit("movzx eax, byte [rsp]")  # Load byte into eax (zero-extended)
+        self.emit_set_read_failed(0)
+        self.emit(f"jmp {done_label}")
+        
+        # EOF/error case
+        self.emit_label(f".readchar_eof_{self.label_counter}")
+        self.emit("mov eax, -1")         # Return -1 for EOF
+        self.emit_set_read_failed(1)
+        
+        self.emit_label(done_label)
+        self.emit("add rsp, 8")          # Restore stack
+    
+    def compile_read_failed(self, read_failed_expr: 'ReadFailed'):
+        """
+        read_failed() - returns bool indicating if last read failed
+        """
+        self.needs_read_failed_flag = True
+        
+        self.emit("; read_failed() - check error flag")
+        self.emit("movabs r11, @_read_failed")
+        self.emit("movzx eax, byte [r11]")
+    
+    def emit_set_read_failed(self, value: int):
+        """Helper to set the _read_failed flag (0 or 1)"""
+        self.emit(f"movabs r11, @_read_failed")
+        self.emit(f"mov byte [r11], {value}")
+    
+    def emit_set_read_failed_from_al(self):
+        """Helper to set the _read_failed flag from AL register"""
+        self.emit("movabs r11, @_read_failed")
+        self.emit("mov byte [r11], al")
+    
+    def compile_read_string_until_eof(self):
+        """
+        Read all input until EOF into mmap'd buffer
+        Returns pointer in rax
+        """
+        buffer_size = 4096  # Initial buffer size
+        
+        self.emit("; read() string - read until EOF")
+        self.emit("push rbx")
+        self.emit("push r12")
+        self.emit("push r13")
+        self.emit("push r14")
+        
+        # mmap anonymous memory for buffer
+        # mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0)
+        self.emit(f"; mmap buffer ({buffer_size} bytes)")
+        self.emit("mov rax, 9")           # syscall: mmap
+        self.emit("xor rdi, rdi")         # addr: NULL
+        self.emit(f"mov rsi, {buffer_size}")  # length
+        self.emit("mov rdx, 3")           # prot: PROT_READ | PROT_WRITE
+        self.emit("mov r10, 0x22")        # flags: MAP_PRIVATE | MAP_ANONYMOUS
+        self.emit("mov r8, -1")           # fd: -1
+        self.emit("xor r9, r9")           # offset: 0
+        self.emit("syscall")
+        
+        self.emit("mov r12, rax")         # r12 = buffer start
+        self.emit("mov r13, rax")         # r13 = current write position
+        self.emit(f"mov r14, {buffer_size}")  # r14 = remaining space
+        
+        read_loop = self.fresh_label("read_loop")
+        read_done = self.fresh_label("read_done")
+        
+        self.emit_label(read_loop)
+        # read(0, r13, r14)
+        self.emit("xor eax, eax")         # syscall: read
+        self.emit("xor edi, edi")         # fd: stdin
+        self.emit("mov rsi, r13")         # buf: current position
+        self.emit("mov rdx, r14")         # count: remaining
+        self.emit("syscall")
+        
+        # Check result
+        self.emit("test rax, rax")
+        self.emit(f"jle {read_done}")     # EOF or error
+        
+        # Update position
+        self.emit("add r13, rax")         # advance position
+        self.emit("sub r14, rax")         # decrease remaining
+        
+        # If buffer full, we'd need to grow - for MVP just continue
+        self.emit("test r14, r14")
+        self.emit(f"jnz {read_loop}")
+        
+        self.emit_label(read_done)
+        # Calculate length and null-terminate
+        self.emit("mov byte [r13], 0")    # null terminate
+        
+        # Set error flag based on whether we read anything
+        self.emit("mov rax, r13")
+        self.emit("sub rax, r12")         # rax = bytes read
+        self.emit("test rax, rax")
+        self.emit("setz al")              # al = 1 if no bytes read
+        self.emit_set_read_failed_from_al()
+        
+        # Return buffer pointer
+        self.emit("mov rax, r12")
+        
+        self.emit("pop r14")
+        self.emit("pop r13")
+        self.emit("pop r12")
+        self.emit("pop rbx")
+    
+    def compile_readln_string(self):
+        """
+        Read one line (until \\n) into mmap'd buffer
+        Strips the newline character
+        Returns pointer in rax
+        """
+        buffer_size = 4096
+        
+        self.emit("; readln() string - read until newline")
+        self.emit("push rbx")
+        self.emit("push r12")
+        self.emit("push r13")
+        
+        # mmap anonymous memory for buffer
+        self.emit(f"; mmap buffer ({buffer_size} bytes)")
+        self.emit("mov rax, 9")           # syscall: mmap
+        self.emit("xor rdi, rdi")         # addr: NULL
+        self.emit(f"mov rsi, {buffer_size}")  # length
+        self.emit("mov rdx, 3")           # prot: PROT_READ | PROT_WRITE
+        self.emit("mov r10, 0x22")        # flags: MAP_PRIVATE | MAP_ANONYMOUS
+        self.emit("mov r8, -1")           # fd: -1
+        self.emit("xor r9, r9")           # offset: 0
+        self.emit("syscall")
+        
+        self.emit("mov r12, rax")         # r12 = buffer start
+        self.emit("mov r13, rax")         # r13 = current write position
+        self.emit("xor rbx, rbx")         # rbx = bytes read total
+        
+        read_loop = self.fresh_label("readln_loop")
+        read_done = self.fresh_label("readln_done")
+        read_eof = self.fresh_label("readln_eof")
+        
+        self.emit_label(read_loop)
+        # read(0, r13, 1) - read one byte at a time
+        self.emit("xor eax, eax")         # syscall: read
+        self.emit("xor edi, edi")         # fd: stdin
+        self.emit("mov rsi, r13")         # buf: current position
+        self.emit("mov edx, 1")           # count: 1 byte
+        self.emit("syscall")
+        
+        # Check result
+        self.emit("test rax, rax")
+        self.emit(f"jle {read_eof}")      # EOF or error
+        
+        # Check if newline - load byte first then compare
+        self.emit("movzx eax, byte [r13]")  # load byte into eax
+        self.emit("cmp eax, 10")          # compare with '\\n'
+        self.emit(f"je {read_done}")
+        
+        # Not newline, advance
+        self.emit("inc r13")
+        self.emit("inc rbx")
+        self.emit(f"jmp {read_loop}")
+        
+        self.emit_label(read_eof)
+        # EOF reached - check if we read anything
+        self.emit("test rbx, rbx")
+        self.emit("xor eax, eax")         # clear eax
+        self.emit(f"jnz .readln_have_data_{self.label_counter}")
+        self.emit("mov eax, 1")           # no data = error
+        self.emit_label(f".readln_have_data_{self.label_counter}")
+        self.emit_set_read_failed_from_al()
+        self.emit(f"jmp .readln_finish_{self.label_counter}")
+        
+        self.emit_label(read_done)
+        # Newline found - success, clear error flag
+        self.emit_set_read_failed(0)
+        
+        self.emit_label(f".readln_finish_{self.label_counter}")
+        # Null-terminate (at current position, overwriting newline or at end)
+        self.emit("mov byte [r13], 0")
+        
+        # Return buffer pointer
+        self.emit("mov rax, r12")
+        
+        self.emit("pop r13")
+        self.emit("pop r12")
+        self.emit("pop rbx")
+    
+    def compile_readln_integer(self, target_type: str):
+        """
+        Read one line and parse as integer
+        Sets read_failed if parsing fails
+        Returns parsed value in rax/eax
+        """
+        is_signed = target_type in ('i8', 'i16', 'i32', 'i64')
+        
+        self.emit(f"; readln() integer ({target_type})")
+        self.emit("push rbx")
+        self.emit("push r12")
+        self.emit("push r13")
+        self.emit("push r14")
+        
+        # Use stack for small buffer (64 bytes enough for any integer)
+        self.emit("sub rsp, 64")
+        
+        self.emit("mov r12, rsp")         # r12 = buffer start
+        self.emit("mov r13, rsp")         # r13 = current position
+        self.emit("xor r14, r14")         # r14 = bytes read
+        
+        read_loop = self.fresh_label("readln_int_loop")
+        parse_start = self.fresh_label("parse_start")
+        read_eof = self.fresh_label("readln_int_eof")
+        
+        self.emit_label(read_loop)
+        # read(0, r13, 1)
+        self.emit("xor eax, eax")
+        self.emit("xor edi, edi")
+        self.emit("mov rsi, r13")
+        self.emit("mov edx, 1")
+        self.emit("syscall")
+        
+        self.emit("test rax, rax")
+        self.emit(f"jle {read_eof}")
+        
+        # Check for newline (load byte first, then compare)
+        self.emit("movzx eax, byte [r13]")
+        self.emit("cmp al, 10")
+        self.emit(f"je {parse_start}")
+        
+        # Advance
+        self.emit("inc r13")
+        self.emit("inc r14")
+        self.emit("cmp r14, 63")          # Buffer limit
+        self.emit(f"jl {read_loop}")
+        
+        self.emit_label(read_eof)
+        # EOF - if no bytes read, error
+        self.emit("test r14, r14")
+        self.emit(f"jnz {parse_start}")
+        # Empty input
+        self.emit("xor eax, eax")
+        self.emit_set_read_failed(1)
+        self.emit(f"jmp .readln_int_done_{self.label_counter}")
+        
+        self.emit_label(parse_start)
+        # Null-terminate
+        self.emit("mov byte [r13], 0")
+        
+        # Parse integer from buffer at r12
+        self._emit_parse_integer(target_type, is_signed)
+        
+        self.emit_label(f".readln_int_done_{self.label_counter}")
+        self.emit("add rsp, 64")
+        self.emit("pop r14")
+        self.emit("pop r13")
+        self.emit("pop r12")
+        self.emit("pop rbx")
+    
+    def compile_read_integer_until_eof(self, target_type: str):
+        """
+        Read until EOF and parse as integer (takes first valid integer)
+        For simplicity, this is same as readln for MVP
+        """
+        self.compile_readln_integer(target_type)
+    
+    def _emit_parse_integer(self, target_type: str, is_signed: bool):
+        """
+        Parse integer from null-terminated string at r12
+        Result in rax, sets read_failed on error
+        """
+        parse_loop = self.fresh_label("parse_loop")
+        parse_done = self.fresh_label("parse_done")
+        parse_error = self.fresh_label("parse_error")
+        
+        self.emit("; parse integer from string")
+        self.emit("xor rax, rax")         # result = 0
+        self.emit("xor rbx, rbx")         # negative flag = 0
+        self.emit("mov r13, r12")         # r13 = current char
+        
+        # Skip leading whitespace
+        skip_ws = self.fresh_label("skip_ws")
+        self.emit_label(skip_ws)
+        self.emit("movzx ecx, byte [r13]")
+        self.emit("cmp cl, ' '")
+        self.emit(f"jne .check_sign_{self.label_counter}")
+        self.emit("inc r13")
+        self.emit(f"jmp {skip_ws}")
+        
+        self.emit_label(f".check_sign_{self.label_counter}")
+        # Check for sign
+        if is_signed:
+            self.emit("cmp cl, '-'")
+            self.emit(f"jne .check_plus_{self.label_counter}")
+            self.emit("mov rbx, 1")       # negative = true
+            self.emit("inc r13")
+            self.emit(f"jmp {parse_loop}")
+            
+            self.emit_label(f".check_plus_{self.label_counter}")
+            self.emit("cmp cl, '+'")
+            self.emit(f"jne {parse_loop}")
+            self.emit("inc r13")
+        
+        self.emit_label(parse_loop)
+        self.emit("movzx ecx, byte [r13]")
+        
+        # Check for end (null or whitespace)
+        self.emit("test cl, cl")
+        self.emit(f"jz {parse_done}")
+        self.emit("cmp cl, ' '")
+        self.emit(f"je {parse_done}")
+        self.emit("cmp cl, 10")           # newline
+        self.emit(f"je {parse_done}")
+        self.emit("cmp cl, 13")           # carriage return
+        self.emit(f"je {parse_done}")
+        
+        # Check if digit
+        self.emit("sub cl, '0'")
+        self.emit("cmp cl, 9")
+        self.emit(f"ja {parse_error}")    # Not a digit
+        
+        # result = result * 10 + digit
+        # Use r14 as scratch for multiply: rax = rax * 10
+        self.emit("mov r14, 10")
+        self.emit("imul rax, r14")
+        # cl already has the digit, extend to r14 and add
+        self.emit("and rcx, 0xFF")        # Zero-extend cl to rcx
+        self.emit("add rax, rcx")
+        
+        self.emit("inc r13")
+        self.emit(f"jmp {parse_loop}")
+        
+        self.emit_label(parse_error)
+        self.emit("xor eax, eax")
+        self.emit_set_read_failed(1)
+        self.emit(f"jmp .parse_return_{self.label_counter}")
+        
+        self.emit_label(parse_done)
+        # Check if we parsed at least one digit
+        self.emit("cmp r13, r12")
+        self.emit(f"jle {parse_error}")   # No digits parsed
+        
+        # Apply negative sign
+        if is_signed:
+            self.emit("test rbx, rbx")
+            self.emit(f"jz .parse_positive_{self.label_counter}")
+            self.emit("neg rax")
+            self.emit_label(f".parse_positive_{self.label_counter}")
+        
+        self.emit_set_read_failed(0)  # Success
+        
+        self.emit_label(f".parse_return_{self.label_counter}")
+
 
 if __name__ == '__main__':
     from tokenization_engine import Lexer

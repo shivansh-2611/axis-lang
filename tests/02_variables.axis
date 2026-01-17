@@ -1,14 +1,14 @@
-// AXIS Example 02: Variables and Arithmetic
-// Demonstrates variable declaration and basic math
-// Expected exit code: 55
+// AXIS Example 02: Variables und Arithmetic
+// variablen deklarieren und bisschen mathe
+// expected: 55
 
 func main() -> i32:
-    # Integer variables with explicit types
+    # integer variablen mit explizitem typ
     x: i32 = 10
     y: i32 = 20
     z: i32 = 25
     
-    # Arithmetic operations
+    # arithmetik
     sum: i32 = x + y + z        # 55
     
     give sum

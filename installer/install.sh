@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # AXIS Language Installer for Linux
-# Version: 1.0.1-beta
+# Version: 1.0.2-beta
 #
 # Usage: ./install.sh [--user|--system]
 #
@@ -49,7 +49,7 @@ else
 fi
 
 echo -e "${GREEN}═══════════════════════════════════════════════════${NC}"
-echo -e "${GREEN}  AXIS Language Installer (Beta 1.0.1)${NC}"
+echo -e "${GREEN}  AXIS Language Installer (Beta 1.0.2)${NC}"
 echo -e "${GREEN}═══════════════════════════════════════════════════${NC}"
 echo ""
 echo "Installation mode: $INSTALL_MODE"

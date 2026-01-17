@@ -30,6 +30,10 @@ class Assembler:
         self.current_instr_index = 0
         # jump forms tracking für relaxation - wichtig dass index-based ist!
         
+        # String relocations für write() support
+        # List of (offset, label) - offset is position of 8-byte placeholder in machine code
+        self.string_relocations = []
+        
     def get_reg_num(self, reg):
         reg = reg.lower()
         if reg in self.reg8 or reg in self.reg8_rex:
@@ -67,6 +71,10 @@ class Assembler:
         value_str = value_str.strip()
         if not value_str:
             raise ValueError("Leerer Immediate-Wert")
+        
+        # Handle character literals: '0', '-', etc.
+        if len(value_str) == 3 and value_str.startswith("'") and value_str.endswith("'"):
+            return ord(value_str[1])
         
         negative = value_str.startswith('-')
         if negative:
@@ -233,6 +241,51 @@ class Assembler:
                     bytecode.extend(list(disp.to_bytes(4, 'little', signed=True)))
                 
                 return bytecode
+            
+            # Handle mov byte [r11], imm8 or mov byte [r11], al
+            if dest_mem.strip() == '[r11]':
+                if self.is_immediate(src):
+                    # mov byte [r11], imm8: C6 /0 with r11 addressing
+                    imm = self.parse_immediate(src)
+                    if -128 <= imm <= 255:
+                        # REX.B (r11 is r8+3), ModR/M with mod=00, r/m=011 (r11 % 8)
+                        # r11 = 11, so r11 % 8 = 3
+                        rex = 0x41  # REX.B
+                        modrm = self.encode_modrm(0b00, 0, 0b011)  # mod=00 (no disp), reg=0, r/m=3 (r11)
+                        bytecode = [rex, 0xC6, modrm, imm & 0xFF]
+                        return bytecode
+                else:
+                    # mov byte [r11], r8 (e.g., al)
+                    src_num, src_type = self.get_reg_num(src)
+                    if src_num is not None and src_type == RegisterType.REG_8:
+                        # REX.B for r11, possibly REX.R for r8-r15 src
+                        rex = 0x41  # REX.B
+                        if src_num >= 8:
+                            rex |= 0x04  # REX.R
+                        modrm = self.encode_modrm(0b00, src_num % 8, 0b011)
+                        bytecode = [rex, 0x88, modrm]
+                        return bytecode
+            
+            # Handle mov byte [r12], imm8 (needs SIB byte)
+            if dest_mem.strip() == '[r12]':
+                if self.is_immediate(src):
+                    imm = self.parse_immediate(src)
+                    if -128 <= imm <= 255:
+                        rex = 0x41  # REX.B
+                        modrm = self.encode_modrm(0b00, 0, 0b100)  # r/m=4 means SIB
+                        sib = 0x24  # scale=0, index=4 (none), base=4 (r12)
+                        bytecode = [rex, 0xC6, modrm, sib, imm & 0xFF]
+                        return bytecode
+            
+            # Handle mov byte [r13], imm8 (needs disp8=0)
+            if dest_mem.strip() == '[r13]':
+                if self.is_immediate(src):
+                    imm = self.parse_immediate(src)
+                    if -128 <= imm <= 255:
+                        rex = 0x41  # REX.B
+                        modrm = self.encode_modrm(0b01, 0, 0b101)  # mod=01, r/m=5 (r13)
+                        bytecode = [rex, 0xC6, modrm, 0x00, imm & 0xFF]  # disp8=0
+                        return bytecode
             return None
         
         # Handle mov word [rbp-X], ax (word store)
@@ -410,6 +463,42 @@ class Assembler:
         
         return None
     
+    def assemble_movabs(self, dest, src):
+        """
+        movabs r64, imm64 - 64-bit immediate load
+        Supports @label syntax für string relocations
+        """
+        dest_num, dest_type = self.get_reg_num(dest)
+        if dest_num is None or dest_type != RegisterType.REG_64:
+            return None
+        
+        # Check for @label syntax (string relocation)
+        if src.startswith('@'):
+            label = src[1:]  # Remove @
+            # Record relocation: (offset_in_instruction + 2, label)
+            # +2 because REX prefix + opcode, then 8-byte immediate
+            reloc_offset = self.current_address + 2
+            self.string_relocations.append((reloc_offset, label))
+            
+            # Emit placeholder (0 for now, will be patched)
+            rex = self.build_rex(w=1, b=(dest_num >= 8))
+            bytecode = [rex, 0xB8 + (dest_num % 8)] + [0] * 8
+            return bytecode
+        
+        # Regular immediate
+        if self.is_immediate(src):
+            imm = self.parse_immediate(src)
+            if not self.validate_immediate_size(imm, 64):
+                return None
+            rex = self.build_rex(w=1, b=(dest_num >= 8))
+            try:
+                bytecode = [rex, 0xB8 + (dest_num % 8)] + list(imm.to_bytes(8, 'little', signed=True))
+            except OverflowError:
+                return None
+            return bytecode
+        
+        return None
+    
     def assemble_alu(self, operation, dest, src):
         ops = {'add': 0, 'or': 1, 'and': 4, 'sub': 5, 'xor': 6, 'cmp': 7}
         if operation not in ops:
@@ -437,7 +526,17 @@ class Assembler:
         elif dest_num is not None and self.is_immediate(src):
             imm = self.parse_immediate(src)
             
-            if dest_type == RegisterType.REG_32:
+            if dest_type == RegisterType.REG_8:
+                # ADD r8, imm8: 80 /op ib
+                if not self.validate_immediate_size(imm, 8):
+                    return None
+                modrm = self.encode_modrm(3, op_code, dest_num % 8)
+                bytecode = [0x80, modrm, imm & 0xFF]
+                if dest_num >= 4 or dest.lower() in self.reg8_rex:
+                    rex = self.build_rex(b=(dest_num >= 8))
+                    bytecode = [rex] + bytecode
+                    
+            elif dest_type == RegisterType.REG_32:
                 if -128 <= imm <= 127:
                     modrm = self.encode_modrm(3, op_code, dest_num % 8)
                     bytecode = [0x83, modrm, imm & 0xFF]
@@ -551,7 +650,8 @@ class Assembler:
             'jl': 0x8C, 'jnge': 0x8C, 'jle': 0x8E, 'jng': 0x8E,
             'jg': 0x8F, 'jnle': 0x8F, 'jge': 0x8D, 'jnl': 0x8D,
             'ja': 0x87, 'jnbe': 0x87, 'jae': 0x83, 'jnb': 0x83,
-            'jb': 0x82, 'jnae': 0x82, 'jbe': 0x86, 'jna': 0x86
+            'jb': 0x82, 'jnae': 0x82, 'jbe': 0x86, 'jna': 0x86,
+            'js': 0x88, 'jns': 0x89  # Jump if signed / not signed
         }
         
         if operation not in jmp_codes:
@@ -645,6 +745,75 @@ class Assembler:
         
         return bytecode
     
+    def assemble_test(self, op1, op2):
+        """test reg, reg - bitwise AND that sets flags without storing result"""
+        reg1_num, reg1_type = self.get_reg_num(op1)
+        reg2_num, reg2_type = self.get_reg_num(op2)
+        
+        if reg1_num is None or reg2_num is None:
+            return None
+        if reg1_type != reg2_type:
+            return None
+        
+        modrm = self.encode_modrm(3, reg2_num % 8, reg1_num % 8)
+        
+        if reg1_type == RegisterType.REG_8:
+            # TEST r8, r8: 84 /r
+            bytecode = [0x84, modrm]
+            if reg1_num >= 8 or reg2_num >= 8:
+                rex = self.build_rex(r=(reg2_num >= 8), b=(reg1_num >= 8))
+                bytecode = [rex] + bytecode
+        elif reg1_type == RegisterType.REG_32:
+            # TEST r32, r32: 85 /r
+            bytecode = [0x85, modrm]
+            if reg1_num >= 8 or reg2_num >= 8:
+                rex = self.build_rex(r=(reg2_num >= 8), b=(reg1_num >= 8))
+                bytecode = [rex] + bytecode
+        elif reg1_type == RegisterType.REG_64:
+            # TEST r64, r64: REX.W 85 /r
+            rex = self.build_rex(w=1, r=(reg2_num >= 8), b=(reg1_num >= 8))
+            bytecode = [rex, 0x85, modrm]
+        else:
+            return None
+        
+        return bytecode
+    
+    def assemble_movsxd(self, dest, src):
+        """movsxd r64, r32 - sign extend 32-bit to 64-bit"""
+        dest_num, dest_type = self.get_reg_num(dest)
+        src_num, src_type = self.get_reg_num(src)
+        
+        if dest_num is None or src_num is None:
+            return None
+        if dest_type != RegisterType.REG_64 or src_type != RegisterType.REG_32:
+            return None
+        
+        # MOVSXD r64, r32: REX.W 63 /r
+        rex = self.build_rex(w=1, r=(dest_num >= 8), b=(src_num >= 8))
+        modrm = self.encode_modrm(3, dest_num % 8, src_num % 8)
+        return [rex, 0x63, modrm]
+    
+    def assemble_div(self, operand):
+        """div reg - unsigned divide RDX:RAX by reg, quotient in RAX, remainder in RDX"""
+        reg_num, reg_type = self.get_reg_num(operand)
+        if reg_num is None:
+            return None
+        
+        # DIV uses /6 opcode extension
+        if reg_type == RegisterType.REG_32:
+            modrm = self.encode_modrm(3, 6, reg_num % 8)
+            bytecode = [0xF7, modrm]
+            if reg_num >= 8:
+                bytecode = [0x41] + bytecode
+        elif reg_type == RegisterType.REG_64:
+            rex = self.build_rex(w=1, b=(reg_num >= 8))
+            modrm = self.encode_modrm(3, 6, reg_num % 8)
+            bytecode = [rex, 0xF7, modrm]
+        else:
+            return None
+        
+        return bytecode
+    
     def assemble_movsx(self, dest, src):
         # movsx eax, byte/word [rbp-X] - sign extend byte/word to dword
         dest_num, dest_type = self.get_reg_num(dest)
@@ -703,6 +872,57 @@ class Assembler:
         else:
             return None
         
+        # Handle [r11] - indirect through r11
+        if src.strip() == '[r11]':
+            # movzx eax, byte [r11]: REX.B 0F B6 /r with mod=00, r/m=011 (r11)
+            rex = 0x41  # REX.B for r11
+            if dest_num >= 8:
+                rex |= 0x04  # REX.R
+            modrm = self.encode_modrm(0b00, dest_num % 8, 0b011)  # mod=00, reg=dest, r/m=3 (r11)
+            bytecode = [rex, 0x0F, opcode, modrm]
+            return bytecode
+        
+        # Handle [r10] - indirect through r10
+        if src.strip() == '[r10]':
+            # movzx eax, byte [r10]: REX.B 0F B6 /r with mod=00, r/m=010 (r10)
+            rex = 0x41  # REX.B for r10
+            if dest_num >= 8:
+                rex |= 0x04  # REX.R
+            modrm = self.encode_modrm(0b00, dest_num % 8, 0b010)  # mod=00, reg=dest, r/m=2 (r10)
+            bytecode = [rex, 0x0F, opcode, modrm]
+            return bytecode
+        
+        # Handle [r12] - indirect through r12 (needs SIB byte)
+        if src.strip() == '[r12]':
+            rex = 0x41  # REX.B for r12
+            if dest_num >= 8:
+                rex |= 0x04  # REX.R
+            modrm = self.encode_modrm(0b00, dest_num % 8, 0b100)  # mod=00, reg=dest, r/m=4 (SIB)
+            sib = 0x24  # scale=0, index=4 (none), base=4 (r12)
+            bytecode = [rex, 0x0F, opcode, modrm, sib]
+            return bytecode
+        
+        # Handle [r13] - indirect through r13 (needs disp8=0)
+        if src.strip() == '[r13]':
+            rex = 0x41  # REX.B for r13
+            if dest_num >= 8:
+                rex |= 0x04  # REX.R
+            modrm = self.encode_modrm(0b01, dest_num % 8, 0b101)  # mod=01, reg=dest, r/m=5 (r13)
+            bytecode = [rex, 0x0F, opcode, modrm, 0x00]  # disp8=0
+            return bytecode
+        
+        # Handle [rsp] - indirect through rsp (needs SIB byte)
+        if src.strip() == '[rsp]':
+            rex = None
+            if dest_num >= 8:
+                rex = 0x44  # REX.R
+            modrm = self.encode_modrm(0b00, dest_num % 8, 0b100)  # mod=00, reg=dest, r/m=4 (SIB)
+            sib = 0x24  # scale=0, index=4 (none), base=4 (rsp)
+            bytecode = [0x0F, opcode, modrm, sib]
+            if rex:
+                bytecode = [rex] + bytecode
+            return bytecode
+        
         mem_op = self.parse_memory_operand(src)
         if mem_op is None or mem_op[0] != 'rbp':
             return None
@@ -750,6 +970,33 @@ class Assembler:
             return bytecode
         
         return None
+    
+    def assemble_imul_two_operand(self, dest, src):
+        """
+        Two-operand imul: imul r64, r64 -> dest = dest * src
+        Encoding: REX.W 0F AF /r
+        """
+        dest_num, dest_type = self.get_reg_num(dest)
+        src_num, src_type = self.get_reg_num(src)
+        
+        if dest_num is None or src_num is None:
+            return None
+        
+        # Both must be 64-bit registers
+        if dest_type != RegisterType.REG_64 or src_type != RegisterType.REG_64:
+            return None
+        
+        # REX.W prefix for 64-bit
+        rex = 0x48
+        if dest_num >= 8:
+            rex |= 0x04  # REX.R
+        if src_num >= 8:
+            rex |= 0x01  # REX.B
+        
+        # ModR/M: mod=11 (register), reg=dest, rm=src
+        modrm = self.encode_modrm(3, dest_num % 8, src_num % 8)
+        
+        return [rex, 0x0F, 0xAF, modrm]
     
     def assemble_shift(self, operation, dest, count):
         # Shift operations: shl/shr eax, cl oder shl/shr eax, imm
@@ -828,6 +1075,9 @@ class Assembler:
             if operation == 'neg':
                 return self.assemble_neg(operand) or []
             
+            if operation == 'div':
+                return self.assemble_div(operand) or []
+            
             if operation in ['imul', 'idiv']:
                 return self.assemble_imul_idiv(operation, operand) or []
             
@@ -841,6 +1091,24 @@ class Assembler:
         if len(parts) >= 3:
             dest = parts[1]
             src = ' '.join(parts[2:])
+            
+            # Handle test r, r
+            if operation == 'test':
+                bytecode = self.assemble_test(dest, src)
+                if bytecode:
+                    return bytecode
+            
+            # Handle movsxd r64, r32
+            if operation == 'movsxd':
+                bytecode = self.assemble_movsxd(dest, src)
+                if bytecode:
+                    return bytecode
+            
+            # Handle movabs r64, @label - string relocation
+            if operation == 'movabs':
+                bytecode = self.assemble_movabs(dest, src)
+                if bytecode:
+                    return bytecode
             
             # Handle "mov byte [rbp-X], al" - byte prefix on dest
             if operation == 'mov' and dest == 'byte' and len(parts) >= 4:
@@ -888,6 +1156,11 @@ class Assembler:
                 if bytecode:
                     return bytecode
             
+            if operation == 'imul':
+                bytecode = self.assemble_imul_two_operand(dest, src)
+                if bytecode:
+                    return bytecode
+            
             if operation in ['add', 'sub', 'xor', 'or', 'and', 'cmp']:
                 bytecode = self.assemble_alu(operation, dest, src)
                 if bytecode:
@@ -904,6 +1177,7 @@ class Assembler:
         self.current_instr_index = 0
         self.labels = {}
         self.jump_forms = {}
+        self.string_relocations = []  # Reset relocations
         
         for line in lines:
             if line and not line.startswith(';'):
@@ -942,13 +1216,14 @@ class Assembler:
                 
                 is_jump = operation in ['jmp', 'je', 'jz', 'jne', 'jnz', 'jl', 'jle', 'jg', 'jge',
                                        'ja', 'jae', 'jb', 'jbe', 'jnge', 'jng', 'jnle', 'jnl',
-                                       'jnbe', 'jnb', 'jnae', 'jna']
+                                       'jnbe', 'jnb', 'jnae', 'jna', 'jns']
                 
                 if is_jump and len(parts) >= 2:
                     target = parts[1]
                     
                     if not self.is_immediate(target) and target in self.labels:
-                        current_form = self.jump_forms.get(self.current_instr_index, 'near')
+                        # Start optimistic (short), expand to near if needed
+                        current_form = self.jump_forms.get(self.current_instr_index, 'short')
                         
                         if operation == 'jmp':
                             instr_len = 2 if current_form == 'short' else 5
@@ -957,7 +1232,10 @@ class Assembler:
                         
                         offset = self.labels[target] - (self.current_address + instr_len)
                         
-                        if -128 <= offset <= 127:
+                        # Monotonic: once near, stay near (prevents oscillation)
+                        if current_form == 'near':
+                            new_jump_forms[self.current_instr_index] = 'near'
+                        elif -128 <= offset <= 127:
                             new_jump_forms[self.current_instr_index] = 'short'
                         else:
                             new_jump_forms[self.current_instr_index] = 'near'
@@ -993,6 +1271,7 @@ class Assembler:
     def _generate_code(self, lines):
         self.current_address = 0
         self.current_instr_index = 0
+        self.string_relocations = []  # Reset for final pass
         machine_code = []
         
         for line_num, line in enumerate(lines, 1):
@@ -1011,6 +1290,10 @@ class Assembler:
                 print(f"Fehler Zeile {line_num} '{line}': {e}")
         
         return machine_code
+    
+    def get_string_relocations(self):
+        """Returns list of (offset, label) tuples for string address patching"""
+        return self.string_relocations
     
     def format_hex(self, bytecode):
         return ' '.join(f'{byte:02X}' for byte in bytecode)

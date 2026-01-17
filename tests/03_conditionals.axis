@@ -1,21 +1,21 @@
 // AXIS Example 03: Conditionals
-// Demonstrates when/else branching
-// Expected exit code: 100
+// when/else branching zeug
+// expected: 100
 
 func main() -> i32:
     score: i32 = 85
     result: i32 = 0
     
-    # Conditional branching with when/else
+    # conditional branching mit when/else
     when score >= 90:
-        result = 100    # A grade
+        result = 100    # A
     else:
         when score >= 80:
-            result = 100    # B grade (we return 100 for test)
+            result = 100    # B (wir returnen 100 für test)
         else:
             when score >= 70:
-                result = 70     # C grade
+                result = 70     # C
             else:
-                result = 0      # Fail
+                result = 0      # fail
     
     give result

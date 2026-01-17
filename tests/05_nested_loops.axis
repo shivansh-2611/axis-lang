@@ -1,9 +1,9 @@
 // AXIS Example 05: Nested Loops
-// Demonstrates nested while loops (multiplication table logic)
-// Expected exit code: 42 (6 * 7)
+// verschachtelte while loops (quasi multiplikation)
+// expected: 42 (6 * 7)
 
 func main() -> i32:
-    # Find 6 * 7 using nested loops (counting)
+    # 6 * 7 durch zählen simulieren
     outer: i32 = 0
     result: i32 = 0
     

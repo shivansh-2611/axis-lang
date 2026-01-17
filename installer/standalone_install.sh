@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # AXIS Language - Standalone Installer
-# Version: 1.0.1-beta
+# Version: 1.0.2-beta
 #
 # One-command installation: curl -fsSL https://raw.githubusercontent.com/AGDNoob/axis-lang/main/installer/standalone_install.sh | bash
 #
@@ -17,7 +17,7 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 # Configuration
-AXIS_VERSION="1.0.1-beta"
+AXIS_VERSION="1.0.2-beta"
 GITHUB_REPO="https://github.com/AGDNoob/axis-lang"
 GITHUB_RAW="https://raw.githubusercontent.com/AGDNoob/axis-lang/main"
 MIN_PYTHON_MAJOR=3

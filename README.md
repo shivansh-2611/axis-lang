@@ -298,6 +298,81 @@ flag: bool = True
 done: bool = False
 ```
 
+### Output
+
+AXIS provides `write()` and `writeln()` for output to stdout:
+
+```python
+func main() -> i32:
+    # write() outputs without newline
+    write("Hello ")
+    write("World!")
+    
+    # writeln() adds newline automatically
+    writeln("")        # Just a newline
+    writeln("Done!")   # Text + newline
+    
+    # Works with all types
+    writeln(42)        # Integer output (as decimal)
+    writeln(-123)      # Negative numbers work too
+    writeln(True)      # Boolean outputs as "True"
+    writeln(False)     # Boolean outputs as "False"
+    
+    give 0
+```
+
+**Output functions:**
+- `write(expr)` – Output value without newline
+- `writeln(expr)` – Output value with newline
+
+**Supported types:** `str`, `i8`-`i64`, `u8`-`u64`, `bool`
+
+**String literals:** Use double quotes (`"Hello World!"`) with escape sequences (`\n`, `\t`, `\\`, `\"`)
+
+### Input
+
+AXIS provides `read()`, `readln()`, and `readchar()` for reading from stdin:
+
+```python
+func main() -> i32:
+    # Read a line as string (strips newline)
+    writeln("Enter your name:")
+    name: str = readln()
+    write("Hello, ")
+    writeln(name)
+    
+    # Read a line and parse as integer
+    writeln("Enter a number:")
+    num: i32 = readln()
+    
+    # Check for parse errors
+    when read_failed():
+        writeln("That wasn't a valid number!")
+        give 1
+    
+    writeln(num * 2)
+    
+    # Read a single character (returns ASCII code or -1 for EOF)
+    c: i32 = readchar()
+    when c == -1:
+        writeln("EOF detected")
+    
+    give 0
+```
+
+**Input functions:**
+- `readln()` → Read one line until `\n` (newline stripped)
+- `read()` → Read all input until EOF
+- `readchar()` → Read single byte, returns -1 on EOF
+- `read_failed()` → Returns `True` if last read failed (empty input or parse error)
+
+**Type-aware parsing:**
+- Assign to `str` → Returns the raw string pointer
+- Assign to integer → Parses decimal number from input
+- Invalid integers return 0 with `read_failed() == True`
+
+**Memory model:** Read functions use mmap for buffer allocation. The MVP uses intentional memory leaks (no deallocation).
+
 ### Comments
 
 ```rust
@@ -588,10 +663,9 @@ Offset  | Size | Section
 
 Currently implemented:
 - `exit(code)`: rax=60, rdi=exit_code
-
-Planned:
 - `write(fd, buf, len)`: rax=1
 - `read(fd, buf, len)`: rax=0
+- `mmap(addr, len, prot, flags, fd, offset)`: rax=9
 
 ---
 
@@ -604,12 +678,10 @@ Planned:
 - [ ] Structs and arrays
 - [ ] Pointer dereferencing
 - [ ] Global variables
-- [ ] Heap allocations
-- [ ] String literals
+- [ ] Heap allocations (uses mmap with intentional leaks)
 - [ ] Type casting
 - [ ] Floating-point types
 - [ ] Standard library
-- [ ] `write` syscall (stdout)
 
 ### Implemented ✓
 
@@ -625,16 +697,21 @@ Planned:
 - [x] Function calls (basic)
 - [x] All integer types (i8-i64, u8-u64)
 - [x] VS Code syntax highlighting
+- [x] String literals and data section
+- [x] `write`/`writeln` syscall (stdout)
+- [x] `read`/`readln`/`readchar` syscall (stdin)
 
 ---
 
 ## 🗺️ Roadmap
 
-### Phase 6: I/O
-- [ ] `write` syscall (stdout)
-- [ ] `read` syscall (stdin)
-- [ ] String literals and data section
-- [ ] Basic string operations
+### Phase 6: I/O ✅ Complete
+- [x] `write` syscall (stdout)
+- [x] `writeln` with automatic newline
+- [x] String literals and data section
+- [x] `read`/`readln` syscall (stdin)
+- [x] `readchar` single byte input
+- [x] `read_failed()` error checking
 
 ### Phase 7: Advanced Features
 - [ ] Function parameters (full System V ABI)

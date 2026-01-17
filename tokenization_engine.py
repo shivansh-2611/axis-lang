@@ -1,6 +1,6 @@
 """
-AXIS Lexer
-Deterministic scanner without backtracking.
+AXIS Lexer - tokenization engine
+deterministic scanner, kein backtracking nötig
 """
 
 from enum import Enum, auto
@@ -29,8 +29,18 @@ class TokenType(Enum):
     U64 = auto()
     PTR = auto()
     BOOL = auto()
+    STR = auto()        # str type
     TRUE = auto()
     FALSE = auto()
+    WRITE = auto()      # write()
+    WRITELN = auto()    # writeln()
+    READ = auto()       # read()
+    READLN = auto()     # readln()
+    READCHAR = auto()   # readchar()
+    READ_FAILED = auto() # read_failed()
+    MODE = auto()       # mode
+    SCRIPT = auto()     # script
+    COMPILE = auto()    # compile
     PLUS = auto()       # +
     MINUS = auto()      # -
     STAR = auto()       # *
@@ -58,6 +68,7 @@ class TokenType(Enum):
     COMMA = auto()      # ,
     ARROW = auto()      # ->
     INT_LITERAL = auto()
+    STRING_LITERAL = auto()  # "..."
     IDENTIFIER = auto()
     INDENT = auto()
     DEDENT = auto()
@@ -99,8 +110,18 @@ class Lexer:
         'u64': TokenType.U64,
         'ptr': TokenType.PTR,
         'bool': TokenType.BOOL,
+        'str': TokenType.STR,
         'True': TokenType.TRUE,
         'False': TokenType.FALSE,
+        'write': TokenType.WRITE,
+        'writeln': TokenType.WRITELN,
+        'read': TokenType.READ,
+        'readln': TokenType.READLN,
+        'readchar': TokenType.READCHAR,
+        'read_failed': TokenType.READ_FAILED,
+        'mode': TokenType.MODE,
+        'script': TokenType.SCRIPT,
+        'compile': TokenType.COMPILE,
     }
 
     def __init__(self, source: str):
@@ -191,12 +212,11 @@ class Lexer:
         return None
     
     def skip_comment(self):
-        # single-line comments - rest of line ignorieren
-        # Supports both // (C-style) and # (Python-style) comments
+        # kommentare skippen - // und # beide ok
         if (self.current_char == '/' and self.peek() == '/') or self.current_char == '#':
             while self.current_char and self.current_char != '\n':
                 self.advance()
-            # Don't consume the newline - let the main loop handle it
+            # newline nicht konsumieren, main loop macht das
     
     def read_number(self) -> Token:
         start_line = self.line
@@ -258,6 +278,44 @@ class Lexer:
         token_type = self.KEYWORDS.get(ident, TokenType.IDENTIFIER)
         return Token(token_type, ident, start_line, start_column)
     
+    def read_string(self) -> Token:
+        # string literal lesen mit escape sequences
+        start_line = self.line
+        start_column = self.column
+        self.advance()  # opening "
+        
+        string_content = ''
+        while self.current_char and self.current_char != '"':
+            if self.current_char == '\\':
+                self.advance()
+                if not self.current_char:
+                    self.error("Unterminated string escape")
+                # escape sequences
+                escape_map = {
+                    'n': '\n',
+                    't': '\t',
+                    'r': '\r',
+                    '\\': '\\',
+                    '"': '"',
+                    '0': '\0',
+                }
+                if self.current_char in escape_map:
+                    string_content += escape_map[self.current_char]
+                else:
+                    self.error(f"Unknown escape sequence: \\{self.current_char}")
+                self.advance()
+            elif self.current_char == '\n':
+                self.error("Unterminated string literal")
+            else:
+                string_content += self.current_char
+                self.advance()
+        
+        if not self.current_char:
+            self.error("Unterminated string literal")
+        
+        self.advance()  # closing "
+        return Token(TokenType.STRING_LITERAL, string_content, start_line, start_column)
+    
     def next_token(self) -> Token:
         # pending tokens von DEDENT handling returnen
         if self.pending_tokens:
@@ -294,6 +352,10 @@ class Lexer:
             if self.current_char == '#':
                 self.skip_comment()
                 continue
+            
+            # string literals mit "..."
+            if self.current_char == '"':
+                return self.read_string()
             
             if self.current_char.isdigit() or (self.current_char == '-' and self.peek() and self.peek().isdigit()):
                 return self.read_number()

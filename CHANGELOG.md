@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased] - v1.0.3-beta
+
+### Added
+- **Output Functions**: `write()` and `writeln()` for stdout output
+- **Input Functions**: `read()`, `readln()`, `readchar()` for stdin input
+  - `readln()` → Read one line until newline (stripped from result)
+  - `read()` → Read all input until EOF
+  - `readchar()` → Read single byte, returns -1 on EOF
+  - `read_failed()` → Returns `True` if last read failed
+- **Type-Aware Input Parsing**: Assign to `str` for raw string, to integer type for auto-parsing
+- **String Literals**: Double-quoted strings with escape sequences (`\n`, `\t`, `\\`, `\"`, `\r`, `\0`)
+- **`str` Type**: String type for storing string pointers (8 bytes)
+- **Multi-Type Output**: `write()`/`writeln()` works with `str`, integers (`i8`-`i64`, `u8`-`u64`), and `bool`
+- Integer output converts to decimal string representation
+- Boolean output displays as "True" or "False"
+- New assembler instructions: `test`, `movsxd`, `div`, `jns`, `movabs`, `imul r64, r64`
+- String data stored in ELF `.rodata` section with proper relocation patching
+- BSS section for global `_read_failed` flag
+- mmap syscall for dynamic buffer allocation
+
+### Example
+```python
+func main() -> i32:
+    writeln("Hello World!")
+    writeln(42)
+    writeln(True)
+    
+    # Read input
+    name: str = readln()
+    writeln(name)
+    
+    num: i32 = readln()
+    when read_failed():
+        writeln("Invalid!")
+        give 1
+    
+    give 0
+```
+
+---
+
 ## GitHub Release Template (Copy & Paste for v1.0.2-beta)
 
 ```markdown

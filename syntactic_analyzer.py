@@ -1,7 +1,7 @@
 """
-AXIS Parser
-LL(1) recursive descent parser.
-Generates AST without typee sizes oder Codegen.
+AXIS Parser - syntactic analyzer
+LL(1) recursive descent, ein lookahead reicht
+AST raus, keine types oder codegen hier
 """
 
 from dataclasses import dataclass
@@ -12,9 +12,12 @@ from tokenization_engine import Lexer, Token, TokenType
 class ASTNode:
     """Base class für alle AST-Knoten"""
     pass
+
 @dataclass
 class Program(ASTNode):
+    mode: str  # "script" or "compile"
     functions: List['Function']
+    statements: List['Statement']  # Top-level statements (script mode only)
 
 
 @dataclass
@@ -78,6 +81,12 @@ class Continue(Statement):
 
 
 @dataclass
+class Write(Statement):
+    value: 'Expression'  # was ausgegeben wird
+    newline: bool        # True für writeln
+
+
+@dataclass
 class ExprStatement(Statement):
     expression: 'Expression'
 
@@ -104,6 +113,35 @@ class UnaryOp(Expression):
 class Literal(Expression):
     value: str
     type: str
+
+
+@dataclass
+class StringLiteral(Expression):
+    value: str  # der string content ohne quotes
+
+
+@dataclass
+class Read(Expression):
+    """read() - read until EOF"""
+    pass
+
+
+@dataclass
+class Readln(Expression):
+    """readln() - read one line until \n"""
+    pass
+
+
+@dataclass
+class Readchar(Expression):
+    """readchar() - read single byte, returns -1 for EOF"""
+    pass
+
+
+@dataclass
+class ReadFailed(Expression):
+    """read_failed() - returns bool indicating if last read failed"""
+    pass
 
 
 @dataclass
@@ -161,11 +199,42 @@ class Parser:
     
     def parse(self) -> Program:
         functions = []
+        statements = []
         self.skip_newlines()  # skip initial newlines
+        
+        # Parse mode declaration (optional, default = compile)
+        mode = "compile"
+        if self.match(TokenType.MODE):
+            self.advance()
+            if self.match(TokenType.SCRIPT):
+                mode = "script"
+                self.advance()
+            elif self.match(TokenType.COMPILE):
+                mode = "compile"
+                self.advance()
+            else:
+                raise SyntaxError(f"Expected 'script' or 'compile' after 'mode', got {self.current}")
+            self.skip_newlines()
+        
+        # Parse content based on mode
         while self.current and self.current.type != TokenType.EOF:
-            functions.append(self.parse_function())
-            self.skip_newlines()  # skip newlines between functions
-        return Program(functions)
+            if self.match(TokenType.FUNC):
+                functions.append(self.parse_function())
+            elif mode == "script":
+                # Script mode: allow top-level statements
+                statements.append(self.parse_statement())
+            else:
+                # Compile mode: only functions allowed
+                raise SyntaxError(f"Unexpected token in compile mode (only functions allowed): {self.current}")
+            self.skip_newlines()
+        
+        # Validate: compile mode requires main()
+        if mode == "compile":
+            has_main = any(f.name == "main" for f in functions)
+            if not has_main:
+                raise SyntaxError("Compile mode requires a 'func main()' definition")
+        
+        return Program(mode, functions, statements)
     
     def parse_function(self) -> Function:
         self.expect(TokenType.FUNC)
@@ -206,11 +275,11 @@ class Parser:
         return params
     
     def parse_type(self) -> str:
-        # type names - i8, i32, i64, u32, etc
+        # type names - i8, i32, i64, u32, str, etc
         type_tokens = [
             TokenType.I8, TokenType.I16, TokenType.I32, TokenType.I64,
             TokenType.U8, TokenType.U16, TokenType.U32, TokenType.U64,
-            TokenType.PTR, TokenType.BOOL
+            TokenType.PTR, TokenType.BOOL, TokenType.STR
         ]
         
         if not self.match(*type_tokens):
@@ -265,6 +334,9 @@ class Parser:
             self.advance()
             self.skip_newlines()
             return Continue()
+        
+        if self.match(TokenType.WRITE, TokenType.WRITELN):
+            return self.parse_write()
         
         expr = self.parse_expression()
         
@@ -341,6 +413,16 @@ class Parser:
         # True literal erzeugen für infinite loop
         true_literal = Literal('1', 'bool')
         return While(true_literal, body)
+    
+    def parse_write(self) -> Write:
+        # write(expr) oder writeln(expr)
+        newline = self.current.type == TokenType.WRITELN
+        self.advance()  # WRITE oder WRITELN
+        self.expect(TokenType.LPAREN)
+        value = self.parse_expression()
+        self.expect(TokenType.RPAREN)
+        self.skip_newlines()
+        return Write(value, newline)
     
     def parse_expression(self) -> Expression:
         return self.parse_bitwise_or()
@@ -446,12 +528,17 @@ class Parser:
     
     def parse_primary(self) -> Expression:
         """
-        primary := INT_LITERAL | TRUE | FALSE | IDENTIFIER | call | '(' expression ')'
+        primary := INT_LITERAL | STRING_LITERAL | TRUE | FALSE | IDENTIFIER | call | '(' expression ')'
         """
         if self.match(TokenType.INT_LITERAL):
             value = self.current.value
             self.advance()
             return Literal(value, 'int')
+        
+        if self.match(TokenType.STRING_LITERAL):
+            value = self.current.value
+            self.advance()
+            return StringLiteral(value)
         
         if self.match(TokenType.TRUE):
             self.advance()
@@ -460,6 +547,34 @@ class Parser:
         if self.match(TokenType.FALSE):
             self.advance()
             return Literal('0', 'bool')
+        
+        # read() - read until EOF
+        if self.match(TokenType.READ):
+            self.advance()
+            self.expect(TokenType.LPAREN)
+            self.expect(TokenType.RPAREN)
+            return Read()
+        
+        # readln() - read one line until \n
+        if self.match(TokenType.READLN):
+            self.advance()
+            self.expect(TokenType.LPAREN)
+            self.expect(TokenType.RPAREN)
+            return Readln()
+        
+        # readchar() - read single byte
+        if self.match(TokenType.READCHAR):
+            self.advance()
+            self.expect(TokenType.LPAREN)
+            self.expect(TokenType.RPAREN)
+            return Readchar()
+        
+        # read_failed() - check if last read failed
+        if self.match(TokenType.READ_FAILED):
+            self.advance()
+            self.expect(TokenType.LPAREN)
+            self.expect(TokenType.RPAREN)
+            return ReadFailed()
         
         if self.match(TokenType.IDENTIFIER):
             name = self.current.value
