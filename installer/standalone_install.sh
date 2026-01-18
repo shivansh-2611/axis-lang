@@ -83,8 +83,19 @@ ask_yes_no() {
     done
 }
 
+detect_os() {
+    case "$(uname -s)" in
+        Linux*)  echo "Linux" ;;
+        Darwin*) echo "macOS" ;;
+        *)       echo "Unknown" ;;
+    esac
+}
+
 detect_distro() {
-    if [ -f /etc/os-release ]; then
+    local os=$(detect_os)
+    if [ "$os" = "macOS" ]; then
+        echo "macos"
+    elif [ -f /etc/os-release ]; then
         . /etc/os-release
         echo "$ID"
     else
@@ -130,6 +141,16 @@ install_python() {
             ;;
         opensuse*)
             sudo zypper install -y python311 python311-pip
+            ;;
+        macos)
+            # macOS: Check for Homebrew first
+            if command -v brew &> /dev/null; then
+                brew install python@3.11
+            else
+                print_warning "Homebrew not found. Installing Homebrew first..."
+                /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+                brew install python@3.11
+            fi
             ;;
         *)
             print_error "Unsupported distribution: $distro"

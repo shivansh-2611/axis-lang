@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# AXIS Language Installer for Linux
+# AXIS Language Installer for Linux/macOS
 # Version: 1.0.2-beta
 #
 # Usage: ./install.sh [--user|--system]
@@ -12,7 +12,23 @@ set -e  # Exit on error
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
 NC='\033[0m' # No Color
+
+# Detect OS
+OS="$(uname -s)"
+case "$OS" in
+    Linux*)  PLATFORM="Linux" ;;
+    Darwin*) PLATFORM="macOS" ;;
+    *)       PLATFORM="Unknown" ;;
+esac
+
+if [ "$PLATFORM" = "Unknown" ]; then
+    echo -e "${RED}Error: Unsupported operating system: $OS${NC}"
+    echo "This installer supports Linux and macOS only."
+    echo "For Windows, use install.bat"
+    exit 1
+fi
 
 # Default installation mode
 INSTALL_MODE="user"
@@ -40,8 +56,15 @@ if [ "$INSTALL_MODE" = "system" ]; then
         exit 1
     fi
 else
-    BIN_DIR="$HOME/.local/bin"
-    LIB_DIR="$HOME/.local/lib/axis"
+    if [ "$PLATFORM" = "macOS" ]; then
+        # macOS: Use ~/.local or ~/Library
+        BIN_DIR="$HOME/.local/bin"
+        LIB_DIR="$HOME/.local/lib/axis"
+    else
+        # Linux
+        BIN_DIR="$HOME/.local/bin"
+        LIB_DIR="$HOME/.local/lib/axis"
+    fi
     
     # Create directories if they don't exist
     mkdir -p "$BIN_DIR"
@@ -49,9 +72,10 @@ else
 fi
 
 echo -e "${GREEN}═══════════════════════════════════════════════════${NC}"
-echo -e "${GREEN}  AXIS Language Installer (v1.0.2-beta)${NC}"
+echo -e "${GREEN}  AXIS Language Installer (v1.0.2-beta) - $PLATFORM${NC}"
 echo -e "${GREEN}═══════════════════════════════════════════════════${NC}"
 echo ""
+echo "Platform:          $PLATFORM"
 echo "Installation mode: $INSTALL_MODE"
 echo "Binary directory:  $BIN_DIR"
 echo "Library directory: $LIB_DIR"
