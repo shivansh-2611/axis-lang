@@ -11,7 +11,6 @@ Add-Type -AssemblyName System.Drawing
 
 $AXIS_VERSION = "1.0.2-beta"
 $GITHUB_RAW = "https://raw.githubusercontent.com/AGDNoob/axis-lang/main"
-$GITHUB_REPO = "https://github.com/AGDNoob/axis-lang"
 $MIN_PYTHON_VERSION = [Version]"3.7"
 $INSTALL_DIR = "$env:LOCALAPPDATA\AXIS"
 $BIN_DIR = "$env:LOCALAPPDATA\AXIS\bin"
@@ -131,6 +130,7 @@ setlocal enabledelayedexpansion
 
 set "AXIS_DIR=$INSTALL_DIR"
 set "PYTHON=$PythonPath"
+set "AXIS_VERSION=$AXIS_VERSION"
 
 if "%~1"=="" goto :help
 if "%~1"=="help" goto :help
@@ -169,7 +169,7 @@ if "%~1"=="check" (
 )
 
 if "%~1"=="info" (
-    echo AXIS Language v$AXIS_VERSION
+    echo AXIS Language v%AXIS_VERSION%
     echo.
     echo Installation: %AXIS_DIR%
     echo Python: %PYTHON%
@@ -178,17 +178,17 @@ if "%~1"=="info" (
 )
 
 if "%~1"=="version" (
-    echo AXIS v$AXIS_VERSION
+    echo AXIS v%AXIS_VERSION%
     exit /b 0
 )
 
 if "%~1"=="--version" (
-    echo AXIS v$AXIS_VERSION
+    echo AXIS v%AXIS_VERSION%
     exit /b 0
 )
 
 if "%~1"=="-v" (
-    echo AXIS v$AXIS_VERSION
+    echo AXIS v%AXIS_VERSION%
     exit /b 0
 )
 
@@ -196,7 +196,7 @@ echo Unknown command: %~1
 goto :help
 
 :help
-echo AXIS Language v$AXIS_VERSION
+echo AXIS Language v%AXIS_VERSION%
 echo.
 echo Usage: axis ^<command^> [options]
 echo.
