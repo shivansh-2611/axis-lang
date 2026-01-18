@@ -331,12 +331,12 @@ $form.Controls.Add($pythonLabel)
 # Check Python
 $pythonInfo = Get-PythonVersion
 if ($pythonInfo -and $pythonInfo.Version -ge $MIN_PYTHON_VERSION) {
-    $pythonLabel.Text = "✓ Python $($pythonInfo.Version) found"
+    $pythonLabel.Text = "[OK] Python $($pythonInfo.Version) found"
     $pythonLabel.ForeColor = [System.Drawing.Color]::LightGreen
     $pythonReady = $true
     $pythonPath = $pythonInfo.Path
 } else {
-    $pythonLabel.Text = "✗ Python 3.7+ required (will be installed)"
+    $pythonLabel.Text = "[X] Python 3.7+ required (will be installed)"
     $pythonLabel.ForeColor = [System.Drawing.Color]::Orange
     $pythonReady = $false
     $pythonPath = "python"
@@ -420,7 +420,7 @@ $installButton.Add_Click({
                 $installButton.Enabled = $true
                 return
             }
-            $pythonLabel.Text = "✓ Python installed"
+            $pythonLabel.Text = "[OK] Python installed"
             $pythonLabel.ForeColor = [System.Drawing.Color]::LightGreen
             $script:pythonPath = "python"
         }
