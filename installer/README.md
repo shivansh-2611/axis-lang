@@ -1,12 +1,24 @@
-# AXIS Linux Installer
+# AXIS Installer
 
-This directory contains installation scripts for the AXIS programming language on Linux systems.
+This directory contains installation scripts for the AXIS programming language.
 
 ---
 
 ## 📦 Installation
 
-### User Installation (Recommended)
+### Windows
+
+```batch
+cd installer
+install.bat --user
+```
+
+Or for system-wide installation (run as Administrator):
+```batch
+install.bat --system
+```
+
+### Linux/macOS - User Installation (Recommended)
 
 Installs AXIS to your home directory (`~/.local/bin` and `~/.local/lib/axis`):
 
@@ -18,7 +30,7 @@ chmod +x install.sh
 
 **No root privileges required.**
 
-### System-Wide Installation
+### Linux/macOS - System-Wide Installation
 
 Installs AXIS for all users (`/usr/local/bin` and `/usr/local/lib/axis`):
 
