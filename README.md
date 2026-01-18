@@ -303,11 +303,28 @@ python compilation_pipeline.py run program.axis
 # Compile to ELF64 (Linux)
 python compilation_pipeline.py program.axis -o output --elf
 
-# Compile with verbose output
-python compilation_pipeline.py program.axis -o output --elf -v
+# Check syntax without running
+python compilation_pipeline.py check program.axis
+```
 
-# Show hex dump only
-python compilation_pipeline.py program.axis
+### CLI Commands (Linux/macOS after install)
+
+```bash
+axis run script.axis        # Run in script mode
+axis build prog.axis        # Compile to native binary
+axis check prog.axis        # Validate syntax only
+axis info                   # Show system/environment info
+axis update                 # Update AXIS from GitHub
+axis --help                 # Show all options
+```
+
+### Windows Usage
+
+```batch
+cd installer
+axis.bat run script.axis    # Run script
+axis.bat check prog.axis    # Check syntax
+axis.bat info               # System info
 ```
 
 ### VS Code Extension
