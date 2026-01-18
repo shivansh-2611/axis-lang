@@ -311,9 +311,9 @@ main() {
     local status_text="AXIS Language Installer v$AXIS_VERSION\n\n"
     
     if [ -n "$python_cmd" ]; then
-        status_text+="✓ Python $python_version found\n"
+        status_text+="[OK] Python $python_version found\n"
     else
-        status_text+="✗ Python 3.7+ not found (will be installed)\n"
+        status_text+="[X] Python 3.7+ not found (will be installed)\n"
     fi
     
     status_text+="\nInstall location: $INSTALL_DIR\n"

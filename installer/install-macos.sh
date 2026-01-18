@@ -189,10 +189,10 @@ main() {
 "
     
     if [ -n "$python_cmd" ]; then
-        status_text+="✓ Python $python_version found
+        status_text+="[OK] Python $python_version found
 "
     else
-        status_text+="✗ Python 3.7+ not found (will be installed via Homebrew)
+        status_text+="[X] Python 3.7+ not found (will be installed via Homebrew)
 "
     fi
     
