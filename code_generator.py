@@ -4,9 +4,83 @@ typisierten AST -> assembly -> assembler backend macht den rest
 """
 
 import re
-from typing import List, Optional
+from typing import List, Optional, Set
 from syntactic_analyzer import *
 from semantic_analyzer import SemanticAnalyzer
+
+
+class RegisterAllocator:
+    """
+    Simple register allocator for x86-64.
+    
+    Uses callee-saved registers (rbx, r12-r15) for temporaries.
+    These must be saved/restored in function prologue/epilogue.
+    Falls back to stack when all registers are exhausted.
+    """
+    
+    # Available temporary registers (callee-saved, so we save/restore them)
+    # Order: prefer r12-r15 first, then rbx (commonly used for other things)
+    TEMP_REGS_64 = ['r12', 'r13', 'r14', 'r15', 'rbx']
+    TEMP_REGS_32 = ['r12d', 'r13d', 'r14d', 'r15d', 'ebx']
+    TEMP_REGS_16 = ['r12w', 'r13w', 'r14w', 'r15w', 'bx']
+    TEMP_REGS_8 = ['r12b', 'r13b', 'r14b', 'r15b', 'bl']
+    
+    def __init__(self):
+        self.free_regs: List[str] = list(self.TEMP_REGS_64)  # Stack of free registers
+        self.used_regs: Set[str] = set()  # Registers currently in use
+        self.saved_regs: Set[str] = set()  # Registers that need save/restore
+        self.spill_count = 0  # Track stack spills for debugging
+    
+    def reset(self):
+        """Reset allocator state for a new function."""
+        self.free_regs = list(self.TEMP_REGS_64)
+        self.used_regs = set()
+        self.saved_regs = set()
+        self.spill_count = 0
+    
+    def allocate(self) -> tuple[str, bool]:
+        """
+        Allocate a register.
+        Returns (register_name, is_spill).
+        If is_spill is True, the "register" is actually a stack push.
+        """
+        if self.free_regs:
+            reg = self.free_regs.pop()
+            self.used_regs.add(reg)
+            self.saved_regs.add(reg)  # Mark for save/restore in prologue
+            return (reg, False)
+        else:
+            # All registers in use - need to spill to stack
+            self.spill_count += 1
+            return ('_spill_', True)
+    
+    def release(self, reg: str):
+        """Release a register back to the free pool."""
+        if reg == '_spill_':
+            return  # Stack spill, nothing to release
+        if reg in self.used_regs:
+            self.used_regs.remove(reg)
+            self.free_regs.append(reg)
+    
+    def get_reg_for_type(self, base_reg: str, type_: str) -> str:
+        """Get the appropriate register size for a type."""
+        try:
+            idx = self.TEMP_REGS_64.index(base_reg)
+        except ValueError:
+            return base_reg  # Not a temp reg, return as-is
+        
+        if type_ in ['i8', 'u8']:
+            return self.TEMP_REGS_8[idx]
+        elif type_ in ['i16', 'u16']:
+            return self.TEMP_REGS_16[idx]
+        elif type_ in ['i32', 'u32', 'bool']:
+            return self.TEMP_REGS_32[idx]
+        else:  # i64, u64, ptr, str
+            return self.TEMP_REGS_64[idx]
+    
+    def get_save_restore_regs(self) -> List[str]:
+        """Get list of registers that need to be saved in prologue."""
+        return sorted(list(self.saved_regs))
 
 
 class CodeGenerator:
@@ -33,6 +107,9 @@ class CodeGenerator:
         self.label_counter = 0
         self.current_function = None
         self.loop_stack = []  # Stack für break/continue: (continue_label, break_label)
+        
+        # Register allocator for temporaries
+        self.reg_alloc = RegisterAllocator()
         
         # String literals für .rodata section
         self.string_data: dict[str, tuple[str, int]] = {}  # label -> (content, length)
@@ -147,23 +224,57 @@ class CodeGenerator:
     def compile_function(self, func: Function):
         self.current_function = func
         
+        # Reset register allocator for this function
+        self.reg_alloc.reset()
+        
+        # Compile body first to determine which registers we need
+        body_asm = self.asm_lines
+        self.asm_lines = []
+        self.compile_block(func.body)
+        body_code = self.asm_lines
+        self.asm_lines = body_asm
+        
+        # Get registers that need saving
+        saved_regs = self.reg_alloc.get_save_restore_regs()
+        
+        # Calculate stack space needed (align to 16 bytes)
+        # Extra space for saved registers
+        extra_stack = len(saved_regs) * 8
+        total_stack = func.stack_size + extra_stack
+        # Align to 16 bytes (account for pushed rbp)
+        if (total_stack + 8) % 16 != 0:
+            total_stack += 8
+        
         # Function Label
         self.emit_label(func.name)
         
-        # Prolog
+        # Prolog - save callee-saved registers
         self.emit("push rbp")
         self.emit("mov rbp, rsp")
+        
+        for reg in saved_regs:
+            self.emit(f"push {reg}")
         
         # Stack-Space allokieren
         if func.stack_size > 0:
             self.emit(f"sub rsp, {func.stack_size}")
         
-        self.compile_block(func.body)
+        # Add body code
+        self.asm_lines.extend(body_code)
         
         # Epilog (falls kein explizites Return)
         self.emit_label(f"{func.name}_epilog")
+        
         if func.stack_size > 0:
             self.emit("mov rsp, rbp")
+            # Adjust for pushed callee-saved regs
+            if saved_regs:
+                self.emit(f"sub rsp, {len(saved_regs) * 8}")
+        
+        # Restore callee-saved registers in reverse order
+        for reg in reversed(saved_regs):
+            self.emit(f"pop {reg}")
+        
         self.emit("pop rbp")
         self.emit("ret")
         
@@ -640,15 +751,34 @@ class CodeGenerator:
                 self.emit(f"mov eax, [rbp{symbol.stack_offset:+d}]")
     
     def compile_binaryop(self, binop: BinaryOp):
-        # binary operations - beide seiten evaluate und dann op
+        """
+        Binary operations with register allocation.
+        Uses callee-saved registers for temporaries instead of stack pushes.
+        """
         if binop.op in ['+', '-', '*', '/', '%', '&', '|', '^']:
+            # Evaluate left side -> eax
             self.compile_expression(binop.left)
             
-            # rechts in temp register
-            self.emit("push rax")
+            # Allocate temp register for left result
+            temp_reg, is_spill = self.reg_alloc.allocate()
+            
+            if is_spill:
+                # Fallback to stack if no registers available
+                self.emit("push rax")
+            else:
+                # Save left result in temp register
+                self.emit(f"mov {temp_reg}, rax")
+            
+            # Evaluate right side -> eax
             self.compile_expression(binop.right)
             self.emit("mov ecx, eax")
-            self.emit("pop rax")
+            
+            # Restore left to eax
+            if is_spill:
+                self.emit("pop rax")
+            else:
+                self.emit(f"mov rax, {temp_reg}")
+                self.reg_alloc.release(temp_reg)
             
             if binop.op == '+':
                 self.emit("add eax, ecx")
@@ -679,13 +809,27 @@ class CodeGenerator:
         
         # Shift operators
         elif binop.op in ['<<', '>>']:
+            # Evaluate left side -> eax
             self.compile_expression(binop.left)
             
-            # rechts in ecx (shift count)
-            self.emit("push rax")
+            # Allocate temp register for left result
+            temp_reg, is_spill = self.reg_alloc.allocate()
+            
+            if is_spill:
+                self.emit("push rax")
+            else:
+                self.emit(f"mov {temp_reg}, rax")
+            
+            # Evaluate right side -> ecx (shift count)
             self.compile_expression(binop.right)
             self.emit("mov ecx, eax")
-            self.emit("pop rax")
+            
+            # Restore left to eax
+            if is_spill:
+                self.emit("pop rax")
+            else:
+                self.emit(f"mov rax, {temp_reg}")
+                self.reg_alloc.release(temp_reg)
             
             if binop.op == '<<':
                 # Left shift: shl eax, cl
@@ -702,14 +846,27 @@ class CodeGenerator:
         
         # comparison operators - result is bool
         elif binop.op in ['==', '!=', '<', '<=', '>', '>=']:
-            # Links -> eax
+            # Evaluate left side -> eax
             self.compile_expression(binop.left)
             
-            # Rechts -> ecx
-            self.emit("push rax")
+            # Allocate temp register for left result
+            temp_reg, is_spill = self.reg_alloc.allocate()
+            
+            if is_spill:
+                self.emit("push rax")
+            else:
+                self.emit(f"mov {temp_reg}, rax")
+            
+            # Evaluate right side -> eax
             self.compile_expression(binop.right)
             self.emit("mov ecx, eax")
-            self.emit("pop rax")
+            
+            # Restore left to eax
+            if is_spill:
+                self.emit("pop rax")
+            else:
+                self.emit(f"mov rax, {temp_reg}")
+                self.reg_alloc.release(temp_reg)
             
             # Compare
             self.emit("cmp eax, ecx")
